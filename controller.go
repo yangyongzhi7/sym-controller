@@ -38,11 +38,11 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 
-	samplev1alpha1 "k8s.io/sample-controller/pkg/apis/migrate/v1"
-	clientset "k8s.io/sample-controller/pkg/client/clientset/versioned"
-	samplescheme "k8s.io/sample-controller/pkg/client/clientset/versioned/scheme"
-	informers "k8s.io/sample-controller/pkg/client/informers/externalversions/migrate/v1"
-	listers "k8s.io/sample-controller/pkg/client/listers/migrate/v1"
+	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/migrate/v1"
+	clientset "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned"
+	samplescheme "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned/scheme"
+	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions/migrate/v1"
+	listers "github.com/yangyongzhi/sym-operator/pkg/client/listers/migrate/v1"
 )
 
 const controllerAgentName = "sample-controller"

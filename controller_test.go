@@ -33,9 +33,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
-	samplecontroller "k8s.io/sample-controller/pkg/apis/samplecontroller/v1alpha1"
-	"k8s.io/sample-controller/pkg/generated/clientset/versioned/fake"
-	informers "k8s.io/sample-controller/pkg/generated/informers/externalversions"
+	samplecontroller "github.com/yangyongzhi/sym-operator/pkg/apis/migrate/v1"
+	"github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned/fake"
+	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions"
 )
 
 var (
@@ -89,14 +89,14 @@ func (f *fixture) newController() (*Controller, informers.SharedInformerFactory,
 	k8sI := kubeinformers.NewSharedInformerFactory(f.kubeclient, noResyncPeriodFunc())
 
 	c := NewController(f.kubeclient, f.client,
-		k8sI.Apps().V1().Deployments(), i.Samplecontroller().V1alpha1().Foos())
+		k8sI.Apps().V1().Deployments(), i.Migrate().V1().Foos())
 
 	c.foosSynced = alwaysReady
 	c.deploymentsSynced = alwaysReady
 	c.recorder = &record.FakeRecorder{}
 
 	for _, f := range f.fooLister {
-		i.Samplecontroller().V1alpha1().Foos().Informer().GetIndexer().Add(f)
+		i.Migrate().V1().Foos().Informer().GetIndexer().Add(f)
 	}
 
 	for _, d := range f.deploymentLister {

@@ -1,5 +1,5 @@
 {
-	"ImportPath": "k8s.io/sample-controller",
+	"ImportPath": "github.com/yangyongzhi/sym-operator",
 	"GoVersion": "unknown",
 	"GodepVersion": "gen-godeps",
 	"Packages": [

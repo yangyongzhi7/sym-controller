@@ -38,11 +38,11 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 
-	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/migrate/v1"
+	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/example/v1"
 	clientset "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned"
 	samplescheme "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned/scheme"
-	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions/migrate/v1"
-	listers "github.com/yangyongzhi/sym-operator/pkg/client/listers/migrate/v1"
+	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions/example/v1"
+	listers "github.com/yangyongzhi/sym-operator/pkg/client/listers/example/v1"
 )
 
 const controllerAgentName = "sample-controller"
@@ -329,7 +329,7 @@ func (c *Controller) updateFooStatus(foo *samplev1alpha1.Foo, deployment *appsv1
 	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
 	// UpdateStatus will not allow changes to the Spec of the resource,
 	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.sampleclientset.MigrateV1().Foos(foo.Namespace).Update(fooCopy)
+	_, err := c.sampleclientset.ExampleV1().Foos(foo.Namespace).Update(fooCopy)
 	return err
 }
 

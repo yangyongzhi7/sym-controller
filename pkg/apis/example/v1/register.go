@@ -7,16 +7,12 @@ import (
 )
 
 const (
-	// GroupName is the group name use in this package
-	GroupName = "migrate.dmall.com"
 	// ResourcePlural is the id to indentify pluarals
-	ResourcePlural = "migrates"
+	ResourcePlural = "foos"
 	// ResourceSingular represents the id for identify singular resource
-	ResourceSingular = "migrate"
+	ResourceSingular = "foo"
 	// ResourceKind represent the resource kind
-	ResourceKind = "Migrate"
-	// ResourceVersion represent the resource version
-	ResourceVersion = "v1"
+	ResourceKind = "Foo"
 )
 
 // SchemeGroupVersion is group version used to register these objects
@@ -45,8 +41,6 @@ func init() {
 // Adds the list of known types to api.Scheme.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
-		&Migrate{},
-		&MigrateList{},
 		&Foo{},
 		&FooList{},
 	)

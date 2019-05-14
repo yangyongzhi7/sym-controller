@@ -5,8 +5,9 @@ module github.com/yangyongzhi/sym-operator
 go 1.12
 
 require (
-	k8s.io/api v0.0.0-20190425012535-181e1f9c52c1
-	k8s.io/apimachinery v0.0.0-20190425132440-17f84483f500
+	k8s.io/api v0.0.0-20190430012547-97d6bb8ea5f4
+	k8s.io/apiextensions-apiserver v0.0.0-20190502093314-7526e4c489ad
+	k8s.io/apimachinery v0.0.0-20190502092502-a44ef629a3c9
 	k8s.io/client-go v0.0.0-20190425172711-65184652c889
 	k8s.io/code-generator v0.0.0-20190419212335-ff26e7842f9d
 	k8s.io/klog v0.3.0

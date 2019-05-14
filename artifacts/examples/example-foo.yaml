@@ -1,4 +1,4 @@
-apiVersion: migrate.dmall.com/v1
+apiVersion: example.dmall.com/v1
 kind: Foo
 metadata:
   name: example-foo

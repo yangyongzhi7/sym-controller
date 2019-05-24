@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	"time"
 
 	kubeinformers "k8s.io/client-go/informers"
@@ -56,6 +57,11 @@ func main() {
 		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
+	helmClient, err := helm.NewClient(cfg, kubeClient)
+	if err != nil {
+		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
+	}
+
 	symClient, err := clientset.NewForConfig(cfg)
 	if err != nil {
 		klog.Fatalf("Error building symphony clientset: %s", err.Error())
@@ -64,7 +70,7 @@ func main() {
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
 	symInformerFactory := informers.NewSharedInformerFactory(symClient, time.Second*30)
 
-	controller := NewController(kubeClient, symClient,
+	controller := NewController(kubeClient, symClient, helmClient,
 		kubeInformerFactory.Apps().V1().Deployments(),
 		//symInformerFactory.Example().V1().Foos()
 		symInformerFactory.Devops().V1().Migrates())

@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	"math/rand"
 	"strconv"
 	"time"
@@ -69,6 +70,8 @@ type Controller struct {
 	// sampleclientset is a clientset for our own API group
 	symclientset clientset.Interface
 
+	helmClient *helm.Client
+
 	deploymentsLister appslisters.DeploymentLister
 	deploymentsSynced cache.InformerSynced
 	symLister         listers.MigrateLister
@@ -88,7 +91,7 @@ type Controller struct {
 // NewController returns a new sample controller
 func NewController(
 	kubeclientset kubernetes.Interface,
-	symclientset clientset.Interface,
+	symclientset clientset.Interface, helmClient *helm.Client,
 	deploymentInformer appsinformers.DeploymentInformer,
 	symInformer informers.MigrateInformer) *Controller {
 
@@ -105,6 +108,7 @@ func NewController(
 	controller := &Controller{
 		kubeclientset:     kubeclientset,
 		symclientset:      symclientset,
+		helmClient:        helmClient,
 		deploymentsLister: deploymentInformer.Lister(),
 		deploymentsSynced: deploymentInformer.Informer().HasSynced,
 		symLister:         symInformer.Lister(),
@@ -273,6 +277,10 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
+	//releases := migrate.Spec.Releases
+	//klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
+	//getDeploymentResponse, err := helm.GetDeployment(releases[0].Name, kubeConfig)
+
 	// Get the deployment with the name specified in Foo.spec
 	//deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
 	// If the resource doesn't exist, we'll create it
@@ -306,9 +314,9 @@ func (c *Controller) syncHandler(key string) error {
 	// If an error occurs during Update, we'll requeue the item so we can
 	// attempt processing again later. THis could have been caused by a
 	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
+	//if err != nil {
+	//	return err
+	//}
 
 	// Finally, we update the status block of the Foo resource to reflect the
 	// current state of the world

@@ -17,12 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
-	"math/rand"
-	"strconv"
-	"time"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -37,7 +34,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/helm/pkg/chartutil"
+	helmapi "k8s.io/helm/pkg/helm"
 	"k8s.io/klog"
+	"math/rand"
+	"strconv"
+	"time"
 
 	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/example/v1"
 	clientset "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned"
@@ -247,6 +249,7 @@ func (c *Controller) processNextWorkItem() bool {
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
 	klog.Infof("Start sync handler method, key : '%s'", key)
+
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -277,9 +280,38 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	//releases := migrate.Spec.Releases
-	//klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
-	//getDeploymentResponse, err := helm.GetDeployment(releases[0].Name, kubeConfig)
+	releases := migrate.Spec.Releases
+	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
+
+	action := migrate.Spec.Action
+	klog.Infof("The action : '%s'", action)
+
+	if action == "Install" {
+		for _, release := range releases {
+			rlsName := release.Name
+			rlsNamespace := release.Namespace
+			klog.Infof("Ready to install release [%s] in namespace [%s]", rlsName, rlsNamespace)
+			releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
+			if releaseResponse == nil {
+				klog.Infof("Error - Get the release info : %s", err)
+				//releaseResponse.GetRelease().Chart
+				requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
+				if err != nil {
+					klog.Infof("Get chart from migrate CRD has an error : %s", err)
+				} else {
+					installResponse, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace, helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(release.Raw)))
+					if err != nil {
+						klog.Infof("error : %s", err)
+					} else {
+						klog.Infof("Install response : %s", installResponse)
+					}
+				}
+			} else {
+				klog.Infof("Get the release info : %s, release[%s] has been installed.", releaseResponse, rlsName)
+			}
+
+		}
+	}
 
 	// Get the deployment with the name specified in Foo.spec
 	//deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)

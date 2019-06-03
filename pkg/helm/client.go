@@ -13,6 +13,7 @@ import (
 	"k8s.io/helm/pkg/helm/portforwarder"
 	"k8s.io/helm/pkg/kube"
 	"k8s.io/helm/pkg/proto/hapi/chart"
+	rls "k8s.io/helm/pkg/proto/hapi/services"
 	"os"
 	"strings"
 )
@@ -21,6 +22,16 @@ import (
 type Client struct {
 	*kube.Tunnel
 	*helm.Client
+}
+
+// ReleaseNotFoundError is returned when a Helm related operation is executed on
+// a release (helm release) that doesn't exists
+type ReleaseNotFoundError struct {
+	HelmError error
+}
+
+func (e *ReleaseNotFoundError) Error() string {
+	return fmt.Sprintf("release not found: %s", e.HelmError)
 }
 
 // NewClient
@@ -58,26 +69,15 @@ func SaveChartByte(c *chart.Chart) ([]byte, error) {
 	return chartByte, nil
 }
 
-func (helmClient *Client) Install(releaseName string) {
-	if len(strings.TrimSpace(releaseName)) == 0 {
-		return
+// GetReleaseByVersion returns the details of a helm release version
+func (helmClient *Client) GetReleaseByVersion(releaseName string, version int32) (*rls.GetReleaseContentResponse, error) {
+	rlsInfo, err := helmClient.ReleaseContent(releaseName, helm.ContentReleaseVersion(version))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, &ReleaseNotFoundError{HelmError: err}
+		}
+		return nil, err
 	}
 
-	if namespace == "" {
-		glog.Warning("Deployment namespace was not set failing back to default")
-		namespace = DefaultNamespace
-	}
-
-	basicOptions := []helm.InstallOption{
-		helm.ReleaseName(releaseName),
-		helm.InstallDryRun(dryRun),
-	}
-	installOptions := append(DefaultInstallOptions, basicOptions...)
-	installOptions = append(installOptions, overrideOpts...)
-
-	installRes, err := helmClient.Client.InstallReleaseFromChart(
-		chartRequested,
-		namespace,
-		installOptions...,
-	)
+	return rlsInfo, nil
 }

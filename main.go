@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
+	"os"
 	"time"
 
 	kubeinformers "k8s.io/client-go/informers"
@@ -39,8 +40,8 @@ var (
 )
 
 func main() {
-	// enable logs
-	klog.InitFlags(nil)
+	// Enable logs
+	klog.InitFlags(flag.NewFlagSet(os.Args[0], flag.ExitOnError))
 
 	flag.Parse()
 

@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	v1 "github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,8 +38,6 @@ import (
 	"k8s.io/helm/pkg/chartutil"
 	helmapi "k8s.io/helm/pkg/helm"
 	"k8s.io/klog"
-	"math/rand"
-	"strconv"
 	"time"
 
 	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/example/v1"
@@ -55,7 +54,11 @@ const (
 	SuccessSynced = "Synced"
 	// ErrResourceExists is used as part of the Event 'reason' when a Foo fails
 	// to sync due to a Deployment of the same name already existing.
-	ErrResourceExists = "ErrResourceExists"
+	ResourceExists    = "ResourceExists"
+	ErrGetRelease     = "ErrGetRelease"
+	ErrReleaseContent = "ErrReleaseContent"
+	FailInstall       = "FailInstall"
+	ErrDeleteRelease  = "ErrDeleteRelease"
 
 	// MessageResourceExists is the message used for Events when a resource
 	// fails to sync due to a Deployment already existing
@@ -115,7 +118,7 @@ func NewController(
 		deploymentsSynced: deploymentInformer.Informer().HasSynced,
 		symLister:         symInformer.Lister(),
 		symSynced:         symInformer.Informer().HasSynced,
-		workqueue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Foos"),
+		workqueue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Sym"),
 		recorder:          recorder,
 	}
 
@@ -133,20 +136,20 @@ func NewController(
 	// processing. This way, we don't need to implement custom logic for
 	// handling Deployment resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
-	//deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-	//	AddFunc: controller.handleObject,
-	//	UpdateFunc: func(old, new interface{}) {
-	//		newDepl := new.(*appsv1.Deployment)
-	//		oldDepl := old.(*appsv1.Deployment)
-	//		if newDepl.ResourceVersion == oldDepl.ResourceVersion {
-	//			// Periodic resync will send update events for all known Deployments.
-	//			// Two different versions of the same Deployment will always have different RVs.
-	//			return
-	//		}
-	//		controller.handleObject(new)
-	//	},
-	//	DeleteFunc: controller.handleObject,
-	//})
+	deploymentInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.handleObject,
+		UpdateFunc: func(old, new interface{}) {
+			newDepl := new.(*appsv1.Deployment)
+			oldDepl := old.(*appsv1.Deployment)
+			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
+				// Periodic resync will send update events for all known Deployments.
+				// Two different versions of the same Deployment will always have different RVs.
+				return
+			}
+			controller.handleObject(new)
+		},
+		DeleteFunc: controller.handleObject,
+	})
 
 	return controller
 }
@@ -280,37 +283,13 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	releases := migrate.Spec.Releases
-	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
-
 	action := migrate.Spec.Action
 	klog.Infof("The action : '%s'", action)
 
-	if action == "Install" {
-		for _, release := range releases {
-			rlsName := release.Name
-			rlsNamespace := release.Namespace
-			klog.Infof("Ready to install release [%s] in namespace [%s]", rlsName, rlsNamespace)
-			releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
-			if releaseResponse == nil {
-				klog.Infof("Error - Get the release info : %s", err)
-				//releaseResponse.GetRelease().Chart
-				requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
-				if err != nil {
-					klog.Infof("Get chart from migrate CRD has an error : %s", err)
-				} else {
-					installResponse, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace, helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(release.Raw)))
-					if err != nil {
-						klog.Infof("error : %s", err)
-					} else {
-						klog.Infof("Install response : %s", installResponse)
-					}
-				}
-			} else {
-				klog.Infof("Get the release info : %s, release[%s] has been installed.", releaseResponse, rlsName)
-			}
-
-		}
+	if action == v1.MigrateActionInstall {
+		c.installReleases(migrate)
+	} else if action == v1.MigrateActionDelete {
+		c.deleteReleases(migrate)
 	}
 
 	// Get the deployment with the name specified in Foo.spec
@@ -323,9 +302,9 @@ func (c *Controller) syncHandler(key string) error {
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
+	//if err != nil {
+	//	return err
+	//}
 
 	// If the Deployment is not controlled by this Foo resource, we should log
 	// a warning to the event recorder and ret
@@ -357,8 +336,71 @@ func (c *Controller) syncHandler(key string) error {
 	//	return err
 	//}
 
-	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced+", "+strconv.Itoa(rand.Int()))
+	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
+	//+", "+strconv.Itoa(rand.Int())
+
 	return nil
+}
+
+// Install release
+func (c *Controller) installReleases(migrate *v1.Migrate) {
+	releases := migrate.Spec.Releases
+	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
+
+	for _, release := range releases {
+		rlsName := release.Name
+		rlsNamespace := release.Namespace
+		klog.Infof("Ready to install release [%s] in namespace [%s]", rlsName, rlsNamespace)
+		releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
+		if err != nil {
+			c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
+				fmt.Sprintf("Error - Get the release [%s] info : %s", rlsName, err))
+			continue
+		}
+
+		if releaseResponse == nil {
+			//releaseResponse.GetRelease().Chart
+			requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
+			if err != nil {
+				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
+					fmt.Sprintf("Get chart of release [%s] from migrate CRD has an error : %s", rlsName, err))
+			} else {
+				_, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace,
+					helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(release.Raw)))
+				if err != nil {
+					c.recorder.Event(migrate, corev1.EventTypeWarning, FailInstall,
+						fmt.Sprintf("Install release [%s] has an error : %s", rlsName, err))
+				} else {
+					c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+						fmt.Sprintf("Installing release [%s] successfully", rlsName))
+				}
+			}
+		} else {
+			c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
+				fmt.Sprintf("Release [%s] has been installed, operater don't need to do anything.", rlsName))
+		}
+	}
+}
+
+// Delete releases
+func (c *Controller) deleteReleases(migrate *v1.Migrate) {
+	releases := migrate.Spec.Releases
+	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
+
+	for _, release := range releases {
+		rlsName := release.Name
+		rlsNamespace := release.Namespace
+		klog.Infof("Ready to delete release [%s] in namespace [%s]", rlsName, rlsNamespace)
+		_, err := c.helmClient.DeleteRelease(rlsName, helmapi.DeletePurge(true))
+		if err != nil {
+			c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
+				fmt.Sprintf("Delete error : %s", err))
+			continue
+		}
+
+		c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+			fmt.Sprintf("Release [%s] has been deleted successfully.", rlsName))
+	}
 }
 
 //func (c *Controller) updateFooStatus(foo *samplev1alpha1.Foo, deployment *appsv1.Deployment) error {
@@ -393,40 +435,41 @@ func (c *Controller) enqueueMigrate(obj interface{}) {
 // objects metadata.ownerReferences field for an appropriate OwnerReference.
 // It then enqueues that Foo resource to be processed. If the object does not
 // have an appropriate OwnerReference, it will simply be skipped.
-//func (c *Controller) handleObject(obj interface{}) {
-//	var object metav1.Object
-//	var ok bool
-//	if object, ok = obj.(metav1.Object); !ok {
-//		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
-//		if !ok {
-//			utilruntime.HandleError(fmt.Errorf("error decoding object, invalid type"))
-//			return
-//		}
-//		object, ok = tombstone.Obj.(metav1.Object)
-//		if !ok {
-//			utilruntime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
-//			return
-//		}
-//		klog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
-//	}
-//	klog.V(4).Infof("Processing object: %s", object.GetName())
-//	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-//		// If this object is not owned by a Foo, we should not do anything more
-//		// with it.
-//		if ownerRef.Kind != "Foo" {
-//			return
-//		}
-//
-//		foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
-//		if err != nil {
-//			klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
-//			return
-//		}
-//
-//		c.enqueueFoo(foo)
-//		return
-//	}
-//}
+func (c *Controller) handleObject(obj interface{}) {
+	var object metav1.Object
+	var ok bool
+	if object, ok = obj.(metav1.Object); !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("error decoding object, invalid type"))
+			return
+		}
+		object, ok = tombstone.Obj.(metav1.Object)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
+			return
+		}
+		klog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
+	}
+
+	klog.V(4).Infof("Processing object: %s", object.GetName())
+	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
+		// If this object is not owned by a Foo, we should not do anything more
+		// with it.
+		if ownerRef.Kind != "Foo" {
+			return
+		}
+
+		foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
+		if err != nil {
+			klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
+			return
+		}
+
+		c.enqueueFoo(foo)
+		return
+	}
+}
 
 // newDeployment creates a new Deployment for a Foo resource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover

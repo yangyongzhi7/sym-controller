@@ -21,6 +21,7 @@ import (
 	"fmt"
 	v1 "github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
+	"google.golang.org/grpc/status"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -49,9 +50,12 @@ import (
 
 const controllerAgentName = "symphony-operator"
 
+const migrateNamespace = "default"
+
 const (
 	// SuccessSynced is used as part of the Event 'reason' when a Foo is synced
-	SuccessSynced = "Synced"
+	SuccessSynced        = "Synced"
+	SuccessUpdatedStatus = "SuccessUpdatedStatus"
 	// ErrResourceExists is used as part of the Event 'reason' when a Foo fails
 	// to sync due to a Deployment of the same name already existing.
 	ResourceExists    = "ResourceExists"
@@ -353,9 +357,14 @@ func (c *Controller) installReleases(migrate *v1.Migrate) {
 		klog.Infof("Ready to install release [%s] in namespace [%s]", rlsName, rlsNamespace)
 		releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
 		if err != nil {
-			c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-				fmt.Sprintf("Error - Get the release [%s] info : %s", rlsName, err))
-			continue
+			status, _ := status.FromError(err)
+			if status.Code() == 2 {
+				klog.Infof("Can not find release %s when you want to install it, so you can install it.", rlsName)
+			} else {
+				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
+					fmt.Sprintf("Error - Get the release [%s] info : %s", rlsName, err))
+				continue
+			}
 		}
 
 		if releaseResponse == nil {
@@ -379,7 +388,9 @@ func (c *Controller) installReleases(migrate *v1.Migrate) {
 			c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
 				fmt.Sprintf("Release [%s] has been installed, operater don't need to do anything.", rlsName))
 		}
+
 	}
+
 }
 
 // Delete releases
@@ -403,19 +414,21 @@ func (c *Controller) deleteReleases(migrate *v1.Migrate) {
 	}
 }
 
-//func (c *Controller) updateFooStatus(foo *samplev1alpha1.Foo, deployment *appsv1.Deployment) error {
-//	// NEVER modify objects from the store. It's a read-only, local cache.
-//	// You can use DeepCopy() to make a deep copy of original object and modify this copy
-//	// Or create a copy manually for better performance
-//	fooCopy := foo.DeepCopy()
-//	fooCopy.Status.AvailableReplicas = deployment.Status.AvailableReplicas
-//	// If the CustomResourceSubresources feature gate is not enabled,
-//	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
-//	// UpdateStatus will not allow changes to the Spec of the resource,
-//	// which is ideal for ensuring nothing other than resource status has been updated.
-//	_, err := c.sampleclientset.ExampleV1().Foos(foo.Namespace).Update(fooCopy)
-//	return err
-//}
+func (c *Controller) updateMigrateStatus(migrate *v1.Migrate, deployment *appsv1.Deployment) error {
+	// NEVER modify objects from the store. It's a read-only, local cache.
+	// You can use DeepCopy() to make a deep copy of original object and modify this copy
+	// Or create a copy manually for better performance
+	migrateCopy := migrate.DeepCopy()
+	now := metav1.Now()
+	migrateCopy.Status.LastUpdateTime = &now
+	// If the CustomResourceSubresources feature gate is not enabled,
+	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
+	// UpdateStatus will not allow changes to the Spec of the resource,
+	// which is ideal for ensuring nothing other than resource status has been updated.
+	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
+	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
+	return err
+}
 
 // enqueueFoo takes a Foo resource and converts it into a namespace/name
 // string which is then put onto the work queue. This method should *not* be
@@ -449,26 +462,64 @@ func (c *Controller) handleObject(obj interface{}) {
 			utilruntime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
 			return
 		}
-		klog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
+		klog.Infof("Recovered deleted object '%s' from tombstone", object.GetName())
 	}
 
-	klog.V(4).Infof("Processing object: %s", object.GetName())
-	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-		// If this object is not owned by a Foo, we should not do anything more
-		// with it.
-		if ownerRef.Kind != "Foo" {
-			return
-		}
+	appName := object.GetLabels()["app"]
+	klog.Infof("Processing deployment: %s, app name: %s", object.GetName(), appName)
 
-		foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
-		if err != nil {
-			klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
-			return
-		}
-
-		c.enqueueFoo(foo)
+	// Find the migrate with the app name
+	migrate, err := c.symLister.Migrates(migrateNamespace).Get(appName)
+	if err != nil {
+		klog.Infof("Get a migrate task for deployment: %s has an error: err", object.GetName(), err)
 		return
 	}
+	if migrate == nil {
+		klog.Infof("Can not find a migrate task for deployment: %s, ignore it.", object.GetName())
+		return
+	}
+
+	// Find all deployment with the app name, always there should be two deploymnets with this app name (blue & green).
+	deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
+	// If the resource doesn't exist, we'll create it
+	//if errors.IsNotFound(err) {
+	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
+	//}
+
+	// If an error occurs during Get/Create, we'll requeue the item so we can
+	// attempt processing again later. This could have been caused by a
+	// temporary network failure, or any other transient reason.
+	if err != nil {
+		klog.Infof("Can not find a deployment for migrate: %s, ignore it.", object.GetName())
+		return
+	}
+
+	if deployment == nil {
+		klog.Infof("The deployment for migrate: %s is null, ignore it.", object.GetName())
+		return
+	}
+
+	c.updateMigrateStatus(migrate, deployment)
+
+	//if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
+	// If this object is not owned by a Foo, we should not do anything more
+	// with it.
+	//if ownerRef.Kind != "Foo" {
+	//	return
+	//}
+	//
+	//foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
+	//if err != nil {
+	//	klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
+	//	return
+	//}
+	//
+	//c.enqueueFoo(foo)
+	//return
+	//}
+
+	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessUpdatedStatus,
+		fmt.Sprintf("Updated the status of migrate [%s] successfully.", migrate.GetName()))
 }
 
 // newDeployment creates a new Deployment for a Foo resource. It also sets

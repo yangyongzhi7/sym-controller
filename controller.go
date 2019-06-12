@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
@@ -414,22 +415,6 @@ func (c *Controller) deleteReleases(migrate *v1.Migrate) {
 	}
 }
 
-func (c *Controller) updateMigrateStatus(migrate *v1.Migrate, deployment *appsv1.Deployment) error {
-	// NEVER modify objects from the store. It's a read-only, local cache.
-	// You can use DeepCopy() to make a deep copy of original object and modify this copy
-	// Or create a copy manually for better performance
-	migrateCopy := migrate.DeepCopy()
-	now := metav1.Now()
-	migrateCopy.Status.LastUpdateTime = &now
-	// If the CustomResourceSubresources feature gate is not enabled,
-	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
-	// UpdateStatus will not allow changes to the Spec of the resource,
-	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
-	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
-	return err
-}
-
 // enqueueFoo takes a Foo resource and converts it into a namespace/name
 // string which is then put onto the work queue. This method should *not* be
 // passed resources of any type other than Foo.
@@ -468,7 +453,7 @@ func (c *Controller) handleObject(obj interface{}) {
 	appName := object.GetLabels()["app"]
 	klog.Infof("Processing deployment: %s, app name: %s", object.GetName(), appName)
 
-	// Find the migrate with the app name
+	// Find the migrate with the app name of this deployment
 	migrate, err := c.symLister.Migrates(migrateNamespace).Get(appName)
 	if err != nil {
 		klog.Infof("Get a migrate task for deployment: %s has an error: err", object.GetName(), err)
@@ -480,7 +465,13 @@ func (c *Controller) handleObject(obj interface{}) {
 	}
 
 	// Find all deployment with the app name, always there should be two deploymnets with this app name (blue & green).
-	deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
+
+	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
+
+	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
+	labelSet := labels.Set{}
+	labelSet["app"] = appName
+	deployments, err := c.deploymentsLister.Deployments(object.GetNamespace()).List(labels.SelectorFromSet(labelSet))
 	// If the resource doesn't exist, we'll create it
 	//if errors.IsNotFound(err) {
 	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
@@ -490,16 +481,17 @@ func (c *Controller) handleObject(obj interface{}) {
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
 	if err != nil {
-		klog.Infof("Can not find a deployment for migrate: %s, ignore it.", object.GetName())
+		klog.Infof("Can not find the deployments for migrate: %s, ignore it.", object.GetName())
 		return
 	}
 
-	if deployment == nil {
-		klog.Infof("The deployment for migrate: %s is null, ignore it.", object.GetName())
-		return
+	if migrate.Spec.Action == v1.MigrateActionInstall {
+		c.updateInstallMigrateStatus(migrate, deployments)
 	}
 
-	c.updateMigrateStatus(migrate, deployment)
+	if migrate.Spec.Action == v1.MigrateActionDelete {
+		c.updateDeleteMigrateStatus(migrate, deployments)
+	}
 
 	//if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
 	// If this object is not owned by a Foo, we should not do anything more
@@ -520,6 +512,100 @@ func (c *Controller) handleObject(obj interface{}) {
 
 	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessUpdatedStatus,
 		fmt.Sprintf("Updated the status of migrate [%s] successfully.", migrate.GetName()))
+}
+
+//
+func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
+	migrateCopy := migrate.DeepCopy()
+	now := metav1.Now()
+	migrateCopy.Status.LastUpdateTime = &now
+	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+		"OK_blue", "True", now, now, "", "The deployment has been deleted"})
+	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+		"OK_green", "True", now, now, "", "The deployment has been deleted"})
+
+	if deployments != nil && len(deployments) > 0 {
+		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
+		for _, deploy := range deployments {
+			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d", deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
+			klog.Info(message)
+			group := deploy.Labels["sym-group"]
+			updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+				"OK_" + group, "False", now, now, "", "The deployment exists"})
+		}
+	}
+
+	// NEVER modify objects from the store. It's a read-only, local cache.
+	// You can use DeepCopy() to make a deep copy of original object and modify this copy
+	// Or create a copy manually for better performance
+
+	// If the CustomResourceSubresources feature gate is not enabled,
+	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
+	// UpdateStatus will not allow changes to the Spec of the resource,
+	// which is ideal for ensuring nothing other than resource status has been updated.
+	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
+	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
+	return err
+}
+
+func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
+	migrateCopy := migrate.DeepCopy()
+	now := metav1.Now()
+	migrateCopy.Status.LastUpdateTime = &now
+
+	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+		"Blue_OK", "False", now, now, "", "Waiting for creating"})
+	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+		"Green_OK", "False", now, now, "", "Waiting for creating"})
+	if deployments != nil && len(deployments) > 0 {
+		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
+		for _, deploy := range deployments {
+			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
+				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
+			klog.Info(message)
+			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
+				updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+					"OK_" + deploy.Labels["sym-group"], "True", now, now, "", message})
+			}
+		}
+	}
+
+	// NEVER modify objects from the store. It's a read-only, local cache.
+	// You can use DeepCopy() to make a deep copy of original object and modify this copy
+	// Or create a copy manually for better performance
+
+	// If the CustomResourceSubresources feature gate is not enabled,
+	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
+	// UpdateStatus will not allow changes to the Spec of the resource,
+	// which is ideal for ensuring nothing other than resource status has been updated.
+	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
+	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
+	return err
+}
+
+func updateOrInsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
+	if len(migrateCopy.Status.Conditions) <= 0 {
+		migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
+		return
+	}
+
+	var found = false
+	for _, c := range migrateCopy.Status.Conditions {
+		if c.Type == condition.Type {
+			found = true
+			c.Status = condition.Status
+			c.LastProbeTime = condition.LastProbeTime
+			c.LastTransitionTime = condition.LastTransitionTime
+			c.Message = condition.Message
+			c.Reason = condition.Reason
+			return
+		}
+	}
+
+	if !found {
+		migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
+		return
+	}
 }
 
 // newDeployment creates a new Deployment for a Foo resource. It also sets

@@ -517,12 +517,13 @@ func (c *Controller) handleObject(obj interface{}) {
 //
 func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
+	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
-	migrateCopy.Status.LastUpdateTime = &now
+
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.BlueGroup), "True", now, now, "", "The deployment has been deleted"})
+		constant.ConcatConditionType(constant.BlueGroup), constant.ConditionStatusTrue, now, now, "", "The release has been deleted"})
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.GreenGroup), "True", now, now, "", "The deployment has been deleted"})
+		constant.ConcatConditionType(constant.GreenGroup), constant.ConditionStatusTrue, now, now, "", "The release has been deleted"})
 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
@@ -530,8 +531,13 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d", deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
-				constant.ConcatConditionType(deploy.Labels["sym-group"]), "False", now, now, "", "The deployment still exists"})
+				constant.ConcatConditionType(deploy.Labels["sym-group"]), constant.ConditionStatusFalse, now, now, "", "The deployment still exists"})
 		}
+	}
+
+	calFinalStatus(migrateCopy)
+	if initialFinished == false || migrateCopy.Status.Finished == false {
+		migrateCopy.Status.LastUpdateTime = &now
 	}
 
 	// NEVER modify objects from the store. It's a read-only, local cache.
@@ -549,8 +555,8 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 
 func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
+	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
-	migrateCopy.Status.LastUpdateTime = &now
 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
@@ -558,14 +564,18 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 			conditionType := constant.ConcatConditionType(deploy.Labels["sym-group"])
 			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
-			upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, "False", now, now, "", message})
+			upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusFalse, now, now, "", message})
 			klog.Info(message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
-				upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, "True", now, now, "", message})
+				upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusTrue, now, now, "", message})
 			}
 		}
 	}
 
+	calFinalStatus(migrateCopy)
+	if initialFinished == false || migrateCopy.Status.Finished == false {
+		migrateCopy.Status.LastUpdateTime = &now
+	}
 	// Only for test
 	//clearConditions(migrateCopy)
 
@@ -600,6 +610,22 @@ func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 	}
 
 	migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
+}
+
+func calFinalStatus(migrateCopy *v1.Migrate) {
+	if len(migrateCopy.Status.Conditions) != 2 {
+		migrateCopy.Status.Finished = false
+		return
+	}
+
+	for _, c := range migrateCopy.Status.Conditions {
+		if c.Status == constant.ConditionStatusFalse {
+			migrateCopy.Status.Finished = false
+			return
+		}
+	}
+
+	migrateCopy.Status.Finished = true
 }
 
 //Only use for a test

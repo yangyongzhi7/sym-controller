@@ -26,12 +26,12 @@ type MigrateList struct {
 
 // MigrateSpec
 type MigrateSpec struct {
-	AppName string            `json:"appName,omitempty"`
-	Action  MigrateActionType `json:"action,omitempty"`
-	Meta    map[string]string `json:"meta,omitempty"`
-	Chart   []byte            `json:"chart,omitempty"`
-	// Releases is all of the helm release
-	Releases []*ReleasesConfig `json:"releases,omitempty"`
+	AppName          string            `json:"appName,omitempty"`
+	Action           MigrateActionType `json:"action,omitempty"`
+	Meta             map[string]string `json:"meta,omitempty"`
+	OverrideReplicas *int32            `json:"overrideReplicas,omitempty"`
+	Chart            []byte            `json:"chart,omitempty"`
+	Releases         []*ReleasesConfig `json:"releases,omitempty"`
 }
 
 type MigrateActionType string
@@ -43,17 +43,16 @@ const (
 
 // ReleasesConfig
 type ReleasesConfig struct {
-	// Name is the name of the release
-	Name string `json:"name,omitempty"`
-	// Namespace is the kubernetes namespace of the release.
-	Namespace string `json:"namespace,omitempty"`
-	// Config supplies values to the parametrizable templates of a chart.
-	Raw    string            `json:"raw,omitempty"`
-	Values map[string]string `json:"values,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Namespace string            `json:"namespace,omitempty"`
+	Raw       string            `json:"raw,omitempty"`
+	Values    map[string]string `json:"values,omitempty"`
+	Meta      map[string]string `json:"meta,omitempty"`
 }
 
 // MigrateStatus
 type MigrateStatus struct {
+	Finished       bool               `json:"finished"`
 	Conditions     []MigrateCondition `json:"conditions,omitempty"`
 	StartTime      *metav1.Time       `json:"startTime,omitempty"`
 	LastUpdateTime *metav1.Time       `json:"lastUpdateTime,omitempty"`

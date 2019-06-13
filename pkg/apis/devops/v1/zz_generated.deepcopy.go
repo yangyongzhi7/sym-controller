@@ -102,6 +102,11 @@ func (in *MigrateSpec) DeepCopyInto(out *MigrateSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.OverrideReplicas != nil {
+		in, out := &in.OverrideReplicas, &out.OverrideReplicas
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Chart != nil {
 		in, out := &in.Chart, &out.Chart
 		*out = make([]byte, len(*in))
@@ -167,6 +172,13 @@ func (in *ReleasesConfig) DeepCopyInto(out *ReleasesConfig) {
 	*out = *in
 	if in.Values != nil {
 		in, out := &in.Values, &out.Values
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.Meta != nil {
+		in, out := &in.Meta, &out.Meta
 		*out = make(map[string]string, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val

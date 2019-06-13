@@ -389,7 +389,6 @@ func (c *Controller) installReleases(migrate *v1.Migrate) {
 			c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
 				fmt.Sprintf("Release [%s] has been installed, operater don't need to do anything.", rlsName))
 		}
-
 	}
 
 }
@@ -519,19 +518,19 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 	migrateCopy := migrate.DeepCopy()
 	now := metav1.Now()
 	migrateCopy.Status.LastUpdateTime = &now
-	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+	upsertCondition(migrateCopy, v1.MigrateCondition{
 		"OK_blue", "True", now, now, "", "The deployment has been deleted"})
-	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
+	upsertCondition(migrateCopy, v1.MigrateCondition{
 		"OK_green", "True", now, now, "", "The deployment has been deleted"})
 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
 		for _, deploy := range deployments {
+			conditionType := "OK_" + deploy.Labels["sym-group"]
 			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d", deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
-			group := deploy.Labels["sym-group"]
-			updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
-				"OK_" + group, "False", now, now, "", "The deployment exists"})
+			upsertCondition(migrateCopy, v1.MigrateCondition{
+				conditionType, "False", now, now, "", "The deployment still exists"})
 		}
 	}
 
@@ -553,22 +552,23 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 	now := metav1.Now()
 	migrateCopy.Status.LastUpdateTime = &now
 
-	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
-		"Blue_OK", "False", now, now, "", "Waiting for creating"})
-	updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
-		"Green_OK", "False", now, now, "", "Waiting for creating"})
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
+			conditionType := "OK_" + deploy.Labels["sym-group"]
 			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
+			upsertCondition(migrateCopy, v1.MigrateCondition{
+				conditionType, "False", now, now, "", message})
 			klog.Info(message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
-				updateOrInsertCondition(migrateCopy, v1.MigrateCondition{
-					"OK_" + deploy.Labels["sym-group"], "True", now, now, "", message})
+				upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, "True", now, now, "", message})
 			}
 		}
 	}
+
+	// Only for test
+	//clearConditions(migrateCopy)
 
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
@@ -583,29 +583,34 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 	return err
 }
 
-func updateOrInsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
+func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 	if len(migrateCopy.Status.Conditions) <= 0 {
 		migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
 		return
 	}
 
-	var found = false
-	for _, c := range migrateCopy.Status.Conditions {
-		if c.Type == condition.Type {
-			found = true
-			c.Status = condition.Status
-			c.LastProbeTime = condition.LastProbeTime
-			c.LastTransitionTime = condition.LastTransitionTime
-			c.Message = condition.Message
-			c.Reason = condition.Reason
+	for i, _ := range migrateCopy.Status.Conditions {
+		if migrateCopy.Status.Conditions[i].Type == condition.Type {
+			migrateCopy.Status.Conditions[i] = condition
+			//c.LastProbeTime = condition.LastProbeTime
+			//c.LastTransitionTime = condition.LastTransitionTime
+			//c.Message = condition.Message
+			//c.Reason = condition.Reason
 			return
 		}
 	}
 
-	if !found {
-		migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
+	migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
+}
+
+//Only use for a test
+func clearConditions(migrateCopy *v1.Migrate) {
+	if len(migrateCopy.Status.Conditions) <= 0 {
 		return
 	}
+
+	migrateCopy.Status.Conditions = make([]v1.MigrateCondition, 0)
+
 }
 
 // newDeployment creates a new Deployment for a Foo resource. It also sets

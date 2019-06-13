@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	v1 "github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
+	"github.com/yangyongzhi/sym-operator/pkg/constant"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	"google.golang.org/grpc/status"
 	appsv1 "k8s.io/api/apps/v1"
@@ -519,18 +520,17 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 	now := metav1.Now()
 	migrateCopy.Status.LastUpdateTime = &now
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		"OK_blue", "True", now, now, "", "The deployment has been deleted"})
+		constant.ConcatConditionType(constant.BlueGroup), "True", now, now, "", "The deployment has been deleted"})
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		"OK_green", "True", now, now, "", "The deployment has been deleted"})
+		constant.ConcatConditionType(constant.GreenGroup), "True", now, now, "", "The deployment has been deleted"})
 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
 		for _, deploy := range deployments {
-			conditionType := "OK_" + deploy.Labels["sym-group"]
 			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d", deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
-				conditionType, "False", now, now, "", "The deployment still exists"})
+				constant.ConcatConditionType(deploy.Labels["sym-group"]), "False", now, now, "", "The deployment still exists"})
 		}
 	}
 
@@ -555,11 +555,10 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
-			conditionType := "OK_" + deploy.Labels["sym-group"]
+			conditionType := constant.ConcatConditionType(deploy.Labels["sym-group"])
 			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
-			upsertCondition(migrateCopy, v1.MigrateCondition{
-				conditionType, "False", now, now, "", message})
+			upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, "False", now, now, "", message})
 			klog.Info(message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
 				upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, "True", now, now, "", message})

@@ -51,7 +51,6 @@ import (
 )
 
 const controllerAgentName = "symphony-operator"
-
 const migrateNamespace = "default"
 
 const (
@@ -450,11 +449,11 @@ func (c *Controller) handleObject(obj interface{}) {
 		klog.Infof("Recovered deleted object '%s' from tombstone", object.GetName())
 	}
 
-	appName := object.GetLabels()["app"]
+	appName := object.GetLabels()[constant.AppLabel]
 	klog.Infof("Processing deployment: %s, app name: %s", object.GetName(), appName)
 
-	// Find the migrate with the app name of this deployment
-	migrate, err := c.symLister.Migrates(migrateNamespace).Get(appName)
+	// Find the migrate with the app name of this deployment in this namespace.
+	migrate, err := c.symLister.Migrates(object.GetNamespace()).Get(appName)
 	if err != nil {
 		klog.Infof("Get a migrate task for deployment: %s has an error: err", object.GetName(), err)
 		return
@@ -470,7 +469,7 @@ func (c *Controller) handleObject(obj interface{}) {
 
 	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
 	labelSet := labels.Set{}
-	labelSet["app"] = appName
+	labelSet[constant.AppLabel] = appName
 	deployments, err := c.deploymentsLister.Deployments(object.GetNamespace()).List(labels.SelectorFromSet(labelSet))
 	// If the resource doesn't exist, we'll create it
 	//if errors.IsNotFound(err) {
@@ -514,24 +513,28 @@ func (c *Controller) handleObject(obj interface{}) {
 		fmt.Sprintf("Updated the status of migrate [%s] successfully.", migrate.GetName()))
 }
 
-//
+// Updating the status of a migrate which has been set as a deleting one.
 func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
 
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.BlueGroup), constant.ConditionStatusTrue, now, now, "", "The release has been deleted"})
+		constant.ConcatConditionType(constant.BlueGroup), constant.ConditionStatusTrue,
+		now, now, "", "The release has been deleted"})
 	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.GreenGroup), constant.ConditionStatusTrue, now, now, "", "The release has been deleted"})
+		constant.ConcatConditionType(constant.GreenGroup), constant.ConditionStatusTrue,
+		now, now, "", "The release has been deleted"})
 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
 		for _, deploy := range deployments {
-			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d", deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
+			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d",
+				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
-				constant.ConcatConditionType(deploy.Labels["sym-group"]), constant.ConditionStatusFalse, now, now, "", "The deployment still exists"})
+				constant.ConcatConditionType(deploy.Labels[constant.GroupLabel]), constant.ConditionStatusFalse,
+				now, now, "", "The deployment still exists"})
 		}
 	}
 
@@ -553,6 +556,7 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 	return err
 }
 
+// Updating the status of migrate which has been set as a installing one
 func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
@@ -561,13 +565,15 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
-			conditionType := constant.ConcatConditionType(deploy.Labels["sym-group"])
+			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
 			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
-			upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusFalse, now, now, "", message})
+			upsertCondition(migrateCopy, v1.MigrateCondition{
+				conditionType, constant.ConditionStatusFalse, now, now, "", message})
 			klog.Info(message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
-				upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusTrue, now, now, "", message})
+				upsertCondition(migrateCopy, v1.MigrateCondition{
+					conditionType, constant.ConditionStatusTrue, now, now, "", message})
 			}
 		}
 	}
@@ -592,6 +598,7 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 	return err
 }
 
+// Updating or inserting a condition for this migrate
 func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 	if len(migrateCopy.Status.Conditions) <= 0 {
 		migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
@@ -612,6 +619,7 @@ func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 	migrateCopy.Status.Conditions = append(migrateCopy.Status.Conditions, condition)
 }
 
+// You should calculate the final status for this migrate after inserting (update) its conditions.
 func calFinalStatus(migrateCopy *v1.Migrate) {
 	if len(migrateCopy.Status.Conditions) != 2 {
 		migrateCopy.Status.Finished = false
@@ -628,7 +636,7 @@ func calFinalStatus(migrateCopy *v1.Migrate) {
 	migrateCopy.Status.Finished = true
 }
 
-//Only use for a test
+//It is always used for a test case if you want to delete all the redundant conditions.
 func clearConditions(migrateCopy *v1.Migrate) {
 	if len(migrateCopy.Status.Conditions) <= 0 {
 		return

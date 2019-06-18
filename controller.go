@@ -19,7 +19,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	v1 "github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
+	"github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
 	"github.com/yangyongzhi/sym-operator/pkg/constant"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	"google.golang.org/grpc/status"
@@ -278,6 +278,15 @@ func (c *Controller) syncHandler(key string) error {
 		return err
 	}
 
+	if migrate == nil {
+		klog.Infof("Can not find the migrate with key: '%s'", key)
+		return nil
+	}
+	if migrate.DeletionTimestamp != nil {
+		klog.Infof("The migrate has been deleted, key: '%s'", key)
+		return nil
+	}
+
 	appName := migrate.Spec.AppName
 	klog.Infof("The appName of this migrate : '%s'", appName)
 	if appName == "" {
@@ -288,17 +297,12 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	action := migrate.Spec.Action
-	klog.Infof("The action : '%s'", action)
-
-	if action == v1.MigrateActionInstall {
-		c.installReleases(migrate)
-	} else if action == v1.MigrateActionDelete {
-		c.deleteReleases(migrate)
-	}
-
-	// Get the deployment with the name specified in Foo.spec
-	//deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
+	// Find all deployment with the app name, always there should be two deployments with this app name (blue & green).
+	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
+	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
+	labelSet := labels.Set{}
+	labelSet[constant.AppLabel] = appName
+	deployments, err := c.deploymentsLister.Deployments(migrate.GetNamespace()).List(labels.SelectorFromSet(labelSet))
 	// If the resource doesn't exist, we'll create it
 	//if errors.IsNotFound(err) {
 	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
@@ -307,43 +311,23 @@ func (c *Controller) syncHandler(key string) error {
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
-	//if err != nil {
-	//	return err
-	//}
+	if err != nil {
+		klog.Infof("Can not find the deployments for migrate: %s, ignore it.", migrate.GetName())
+		return nil
+	}
+	action := migrate.Spec.Action
+	klog.Infof("The action : '%s'", action)
 
-	// If the Deployment is not controlled by this Foo resource, we should log
-	// a warning to the event recorder and ret
-	//if !metav1.IsControlledBy(deployment, foo) {
-	//	msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
-	//	c.recorder.Event(foo, corev1.EventTypeWarning, ErrResourceExists, msg)
-	//	return fmt.Errorf(msg)
-	//}
-
-	// If this number of the replicas on the Foo resource is specified, and the
-	// number does not equal the current desired replicas on the Deployment, we
-	// should update the Deployment resource.
-	//if foo.Spec.Replicas != nil && *foo.Spec.Replicas != *deployment.Spec.Replicas {
-	//	klog.V(4).Infof("Foo %s replicas: %d, deployment replicas: %d", name, *foo.Spec.Replicas, *deployment.Spec.Replicas)
-	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Update(newDeployment(foo))
-	//}
-
-	// If an error occurs during Update, we'll requeue the item so we can
-	// attempt processing again later. THis could have been caused by a
-	// temporary network failure, or any other transient reason.
-	//if err != nil {
-	//	return err
-	//}
-
-	// Finally, we update the status block of the Foo resource to reflect the
-	// current state of the world
-	//err = c.updateFooStatus(foo, deployment)
-	//if err != nil {
-	//	return err
-	//}
+	if action == v1.MigrateActionInstall {
+		c.updateInstallMigrateStatus(migrate, deployments)
+		c.installReleases(migrate)
+	} else if action == v1.MigrateActionDelete {
+		c.updateDeleteMigrateStatus(migrate, deployments)
+		c.deleteReleases(migrate)
+	}
 
 	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	//+", "+strconv.Itoa(rand.Int())
-
 	return nil
 }
 
@@ -462,55 +446,14 @@ func (c *Controller) handleObject(obj interface{}) {
 		klog.Infof("Can not find a migrate task for deployment: %s, ignore it.", object.GetName())
 		return
 	}
-
-	// Find all deployment with the app name, always there should be two deploymnets with this app name (blue & green).
-
-	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
-
-	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
-	labelSet := labels.Set{}
-	labelSet[constant.AppLabel] = appName
-	deployments, err := c.deploymentsLister.Deployments(object.GetNamespace()).List(labels.SelectorFromSet(labelSet))
-	// If the resource doesn't exist, we'll create it
-	//if errors.IsNotFound(err) {
-	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
-	//}
-
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		klog.Infof("Can not find the deployments for migrate: %s, ignore it.", object.GetName())
+	if migrate.DeletionTimestamp != nil {
+		klog.Infof("Maybe the migrate which related with this deployment: %s has been deleted, ignore it.", object.GetName())
 		return
 	}
 
-	if migrate.Spec.Action == v1.MigrateActionInstall {
-		c.updateInstallMigrateStatus(migrate, deployments)
-	}
+	c.enqueueMigrate(migrate)
+	return
 
-	if migrate.Spec.Action == v1.MigrateActionDelete {
-		c.updateDeleteMigrateStatus(migrate, deployments)
-	}
-
-	//if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-	// If this object is not owned by a Foo, we should not do anything more
-	// with it.
-	//if ownerRef.Kind != "Foo" {
-	//	return
-	//}
-	//
-	//foo, err := c.foosLister.Foos(object.GetNamespace()).Get(ownerRef.Name)
-	//if err != nil {
-	//	klog.V(4).Infof("ignoring orphaned object '%s' of foo '%s'", object.GetSelfLink(), ownerRef.Name)
-	//	return
-	//}
-	//
-	//c.enqueueFoo(foo)
-	//return
-	//}
-
-	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessUpdatedStatus,
-		fmt.Sprintf("Updated the status of migrate [%s] successfully.", migrate.GetName()))
 }
 
 // Updating the status of a migrate which has been set as a deleting one.
@@ -529,7 +472,7 @@ func (c *Controller) updateDeleteMigrateStatus(migrate *v1.Migrate, deployments 
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
 		for _, deploy := range deployments {
-			message := fmt.Sprintf("Check the deployment:%s, replica count:%d, available count:%d",
+			message := fmt.Sprintf("Check the deployment:%s: replica:%d, available:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
@@ -566,7 +509,7 @@ func (c *Controller) updateInstallMigrateStatus(migrate *v1.Migrate, deployments
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
 			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
-			message := fmt.Sprintf("Deployment %s has been available, replica count:%d, available count:%d",
+			message := fmt.Sprintf("Deployment %s status: replica:%d, available:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})

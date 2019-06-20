@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
+	"k8s.io/client-go/rest"
 	"os"
 	"time"
 
@@ -47,8 +48,14 @@ func main() {
 
 	// set up signals so we handle the first shutdown signal gracefully
 	stopCh := signals.SetupSignalHandler()
+	var cfg *rest.Config
+	var err error
+	if kubeconfig != "" {
+		cfg, err = clientcmd.BuildConfigFromFlags(masterURL, kubeconfig) // out of cluster config
+	} else {
+		cfg, err = rest.InClusterConfig()
+	}
 
-	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}

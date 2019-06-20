@@ -1,0 +1,29 @@
+{{- if .Values.rbac.create -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "sym-operator.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "sym-operator.name" . }}
+    helm.sh/chart: {{ include "sym-operator.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: {{ include "sym-operator.name" . }}
+    helm.sh/chart: {{ include "sym-operator.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  name: {{ template "sym-operator.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "sym-operator.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end -}}

@@ -33,7 +33,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
-	samplecontroller "github.com/yangyongzhi/sym-operator/pkg/apis/migrate/v1"
+	samplecontroller "github.com/yangyongzhi/sym-operator/pkg/apis/devops/v1"
 	"github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned/fake"
 	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions"
 )

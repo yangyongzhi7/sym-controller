@@ -38,6 +38,7 @@ type MigrateActionType string
 
 const (
 	MigrateActionInstall MigrateActionType = "Install"
+	MigrateActionUpdate  MigrateActionType = "Update"
 	MigrateActionDelete  MigrateActionType = "Delete"
 )
 
@@ -52,10 +53,11 @@ type ReleasesConfig struct {
 
 // MigrateStatus
 type MigrateStatus struct {
-	Finished       bool               `json:"finished"`
-	Conditions     []MigrateCondition `json:"conditions,omitempty"`
-	StartTime      *metav1.Time       `json:"startTime,omitempty"`
-	LastUpdateTime *metav1.Time       `json:"lastUpdateTime,omitempty"`
+	Finished        string             `json:"finished"`
+	ReleaseRevision map[string]int32   `json:"ReleaseRevision,omitempty"`
+	Conditions      []MigrateCondition `json:"conditions,omitempty"`
+	StartTime       *metav1.Time       `json:"startTime,omitempty"`
+	LastUpdateTime  *metav1.Time       `json:"lastUpdateTime,omitempty"`
 }
 
 type MigrateCondition struct {

@@ -328,7 +328,7 @@ func (c *Controller) syncHandler(key string) error {
 		c.deleteReleases(migrate)
 		c.writeDeleteMigrateStatus(migrate, deployments)
 	} else if action == v1.MigrateActionUpdate {
-		revisions := c.updateReleases(migrate)
+		revisions := c.updateReleases(migrate, deployments)
 		c.writeUpdateMigrateStatus(migrate, deployments, revisions)
 	}
 
@@ -389,14 +389,13 @@ func (c *Controller) installReleases(migrate *v1.Migrate) {
 }
 
 // Update release
-func (c *Controller) updateReleases(migrate *v1.Migrate) map[string]int32 {
+func (c *Controller) updateReleases(migrate *v1.Migrate, deployments []*appsv1.Deployment) map[string]int32 {
 	if migrate.Status.Finished == constant.ConditionStatusTrue {
 		klog.Infof("Migrate has been execute successfully: '%s'", migrate.Name)
 		return nil
 	}
 
 	revisions := map[string]int32{}
-
 	releases := migrate.Spec.Releases
 	for _, release := range releases {
 		rlsName := release.Name
@@ -407,10 +406,26 @@ func (c *Controller) updateReleases(migrate *v1.Migrate) map[string]int32 {
 			status, _ := status.FromError(err)
 			if status.Code() == 2 {
 				klog.Infof("Can not find release %s when you want to update it, so you can not update it.", rlsName)
+				requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
+				if err != nil {
+					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
+						fmt.Sprintf("Get chart of release [%s] from migrate CRD has an error : %s", rlsName, err))
+				} else {
+					installResponse, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace,
+						helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(release.Raw)))
+					if err != nil {
+						c.recorder.Event(migrate, corev1.EventTypeWarning, FailInstall,
+							fmt.Sprintf("Update (Install) release [%s] has an error : %s", rlsName, err))
+					} else {
+						revisions[rlsName] = installResponse.Release.Version
+						c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+							fmt.Sprintf("Updating (Installing) release [%s] successfully", rlsName))
+					}
+				}
 				continue
 			} else {
 				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-					fmt.Sprintf("Error - find the release [%s] info : %s, so can not install", rlsName, err))
+					fmt.Sprintf("Error - find the release [%s] info : %s, so can not update", rlsName, err))
 				continue
 			}
 		}
@@ -623,18 +638,27 @@ func (c *Controller) writeUpdateMigrateStatus(migrate *v1.Migrate, deployments [
 	now := metav1.Now()
 
 	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
+		klog.Infof("The deployments for migrate: %s is not null or not empty, then update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
+			var message = ""
 			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
-			rlsName := deploy.Labels[constant.ReleaseLabel]
+
+			rlsName := deploy.Spec.Template.Labels[constant.ReleaseLabel]
 			var currentRelease *v1.ReleasesConfig
 			for _, rls := range migrate.Spec.Releases {
 				if rls.Name == rlsName {
 					currentRelease = rls
 				}
 			}
+			if currentRelease == nil {
+				klog.Infof("Can not find release with deployment's label %s", rlsName)
+				upsertCondition(migrateCopy, v1.MigrateCondition{
+					conditionType, constant.ConditionStatusFalse, now, now, "",
+					fmt.Sprintf("Can not find release with deployment's label %s", rlsName)})
+				continue
+			}
 
-			message := fmt.Sprintf("Deployment %s status: desired replica:%d, available:%d, Migrate replica count:%d",
+			message = fmt.Sprintf("Deployment %s status: desired replica:%d, available:%d, Migrate replica count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas, currentRelease.Replicas)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})
@@ -683,7 +707,7 @@ func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 
 // You should calculate the final status for this migrate after inserting (update) its conditions.
 func calFinalStatus(migrateCopy *v1.Migrate) {
-	if len(migrateCopy.Status.Conditions) != 2 {
+	if len(migrateCopy.Status.Conditions) != len(migrateCopy.Spec.Releases) {
 		migrateCopy.Status.Finished = constant.ConditionStatusFalse
 		return
 	}

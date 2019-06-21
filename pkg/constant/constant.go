@@ -9,8 +9,9 @@ const (
 	ConditionStatusTrue  = "True"
 	ConditionStatusFalse = "False"
 
-	AppLabel   = "app"
-	GroupLabel = "sym-group"
+	AppLabel     = "app"
+	GroupLabel   = "sym-group"
+	ReleaseLabel = "release"
 )
 
 func ConcatConditionType(group string) string {

@@ -102,11 +102,6 @@ func (in *MigrateSpec) DeepCopyInto(out *MigrateSpec) {
 			(*out)[key] = val
 		}
 	}
-	if in.OverrideReplicas != nil {
-		in, out := &in.OverrideReplicas, &out.OverrideReplicas
-		*out = new(int32)
-		**out = **in
-	}
 	if in.Chart != nil {
 		in, out := &in.Chart, &out.Chart
 		*out = make([]byte, len(*in))

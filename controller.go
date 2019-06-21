@@ -77,9 +77,9 @@ const (
 // Controller is the controller implementation for Foo resources
 type Controller struct {
 	// kubeclientset is a standard kubernetes clientset
+	// but symclientset is a clientset for our own API group
 	kubeclientset kubernetes.Interface
-	// sampleclientset is a clientset for our own API group
-	symclientset clientset.Interface
+	symclientset  clientset.Interface
 
 	helmClient *helm.Client
 
@@ -94,6 +94,7 @@ type Controller struct {
 	// time, and makes it easy to ensure we are never processing the same item
 	// simultaneously in two different workers.
 	workqueue workqueue.RateLimitingInterface
+
 	// recorder is an event recorder for recording Event resources to the
 	// Kubernetes API.
 	recorder record.EventRecorder
@@ -107,7 +108,7 @@ func NewController(
 	symInformer informers.MigrateInformer) *Controller {
 
 	// Create event broadcaster
-	// Add sample-controller types to the default Kubernetes Scheme so Events can be
+	// Add sym-migrate-controller types to the default Kubernetes Scheme so Events can be
 	// logged for sample-controller types.
 	utilruntime.Must(samplescheme.AddToScheme(scheme.Scheme))
 	klog.V(4).Info("Creating event broadcaster")
@@ -129,6 +130,7 @@ func NewController(
 	}
 
 	klog.Info("Setting up event handlers")
+
 	// Set up an event handler for when Foo resources change
 	symInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueMigrate,
@@ -136,6 +138,7 @@ func NewController(
 			controller.enqueueMigrate(new)
 		},
 	})
+
 	// Set up an event handler for when Deployment resources change. This
 	// handler will lookup the owner of the given Deployment, and if it is
 	// owned by a Foo resource will enqueue that Foo resource for
@@ -169,10 +172,9 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 	defer c.workqueue.ShutDown()
 
 	// Start the informer factories to begin populating the informer caches
-	klog.Info("Starting Symphony controller")
-
+	klog.Info("Starting Symphony operator...")
 	// Wait for the caches to be synced before starting workers
-	klog.Info("Waiting for informer caches to sync")
+	klog.Info("Waiting for informer caches to sync...")
 	if ok := cache.WaitForCacheSync(stopCh, c.deploymentsSynced, c.symSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
@@ -393,8 +395,6 @@ func (c *Controller) updateReleases(migrate *v1.Migrate) map[string]int32 {
 		return nil
 	}
 
-	desiredReplicaCount := migrate.Spec.OverrideReplicas
-	klog.Infof("The desired replica count of this migrate : '%s'", desiredReplicaCount)
 	revisions := map[string]int32{}
 
 	releases := migrate.Spec.Releases
@@ -626,12 +626,20 @@ func (c *Controller) writeUpdateMigrateStatus(migrate *v1.Migrate, deployments [
 		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
 			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
+			rlsName := deploy.Labels[constant.ReleaseLabel]
+			var currentRelease *v1.ReleasesConfig
+			for _, rls := range migrate.Spec.Releases {
+				if rls.Name == rlsName {
+					currentRelease = rls
+				}
+			}
+
 			message := fmt.Sprintf("Deployment %s status: desired replica:%d, available:%d, Migrate replica count:%d",
-				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas, migrate.Spec.OverrideReplicas)
+				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas, currentRelease.Replicas)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})
 			klog.Info(message)
-			if deploy.Status.Replicas == deploy.Status.AvailableReplicas && deploy.Status.AvailableReplicas == *migrate.Spec.OverrideReplicas {
+			if deploy.Status.Replicas == deploy.Status.AvailableReplicas && deploy.Status.AvailableReplicas == currentRelease.Replicas {
 				upsertCondition(migrateCopy, v1.MigrateCondition{
 					conditionType, constant.ConditionStatusTrue, now, now, "", message})
 			}

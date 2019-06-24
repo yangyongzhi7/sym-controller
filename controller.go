@@ -40,7 +40,10 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/helm/pkg/chartutil"
 	helmapi "k8s.io/helm/pkg/helm"
+	"k8s.io/helm/pkg/proto/hapi/release"
+	rls "k8s.io/helm/pkg/proto/hapi/services"
 	"k8s.io/klog"
+	"strings"
 	"time"
 
 	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/example/v1"
@@ -323,13 +326,13 @@ func (c *Controller) syncHandler(key string) error {
 
 	if action == v1.MigrateActionInstall {
 		c.installReleases(migrate)
-		c.writeInstallMigrateStatus(migrate, deployments)
+		c.syncInstallMigrateStatus(migrate, deployments)
 	} else if action == v1.MigrateActionDelete {
 		c.deleteReleases(migrate)
-		c.writeDeleteMigrateStatus(migrate, deployments)
+		c.syncDeleteMigrateStatus(migrate, deployments)
 	} else if action == v1.MigrateActionUpdate {
 		revisions := c.updateReleases(migrate, deployments)
-		c.writeUpdateMigrateStatus(migrate, deployments, revisions)
+		c.syncUpdateMigrateStatus(migrate, deployments, revisions)
 	}
 
 	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
@@ -390,75 +393,140 @@ func (c *Controller) installReleases(migrate *v1.Migrate) {
 
 // Update release
 func (c *Controller) updateReleases(migrate *v1.Migrate, deployments []*appsv1.Deployment) map[string]int32 {
+	klog.Infof("##### Start to update migrate: '%s'", migrate.Name)
 	if migrate.Status.Finished == constant.ConditionStatusTrue {
-		klog.Infof("Migrate has been execute successfully: '%s'", migrate.Name)
+		klog.Infof("##### The status of migrate has been set as true: '%s', so no need to do anything.", migrate.Name)
 		return nil
 	}
 
 	revisions := map[string]int32{}
 	releases := migrate.Spec.Releases
-	for _, release := range releases {
-		rlsName := release.Name
-		rlsNamespace := release.Namespace
-		klog.Infof("Ready to update release [%s] in namespace [%s]", rlsName, rlsNamespace)
-		releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
-		if err != nil {
-			status, _ := status.FromError(err)
-			if status.Code() == 2 {
-				klog.Infof("Can not find release %s when you want to update it, so you can not update it.", rlsName)
+	releaseIterator := [2]string{constant.BlueGroup, constant.GreenGroup}
+	for _, releaseGroup := range releaseIterator {
+		isNeed := false
+		var currentRelease *v1.ReleasesConfig
+		for _, release := range releases {
+			if strings.Contains(release.Name, releaseGroup) {
+				isNeed = true
+				currentRelease = release
+			}
+		}
+
+		// This release which belongs to this group must be exist.
+		if isNeed {
+			rlsName := currentRelease.Name
+			rlsNamespace := currentRelease.Namespace
+			klog.Infof("##### Release [%s]-[%s] has been defined in Spec, so we should update it", rlsName, rlsNamespace)
+			releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
+			if err != nil {
+				status, _ := status.FromError(err)
+				// if the release is not exist, we should install it.
+				if status.Code() == 2 {
+					klog.Infof("##### Can not find release [%s] when you want to update it, so you should use installing instead of updating.", rlsName)
+					requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
+					if err != nil {
+						c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
+							fmt.Sprintf("Get chart of release [%s] from migrate CRD has an error : %s", rlsName, err))
+					} else {
+						installResponse, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace,
+							helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(currentRelease.Raw)))
+						if err != nil {
+							c.recorder.Event(migrate, corev1.EventTypeWarning, FailInstall,
+								fmt.Sprintf("Update (Install) release [%s] has an error : %s", rlsName, err))
+						} else {
+							revisions[rlsName] = installResponse.Release.Version
+							c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+								fmt.Sprintf("##### The release [%s] which is in the update process has been installed successfully", rlsName))
+						}
+					}
+					continue
+				} else {
+					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
+						fmt.Sprintf("Error - find the release [%s] info : %s, so can not update", rlsName, err))
+					continue
+				}
+			}
+
+			// if this release has been exist, we should update it.
+			if releaseResponse != nil {
+				klog.Infof("##### We already found the release [%s], then we will update it immediately.", rlsName)
+				if migrate.Status.ReleaseRevision[rlsName] == releaseResponse.Release.Version {
+					klog.Infof("##### Release version in the status [%s] has been updated to version [%d], no need to do anything.",
+						rlsName, migrate.Status.ReleaseRevision[rlsName])
+					revisions[rlsName] = releaseResponse.Release.Version
+					continue
+				}
+
+				//releaseResponse.GetRelease().Chart
 				requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
 				if err != nil {
 					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
 						fmt.Sprintf("Get chart of release [%s] from migrate CRD has an error : %s", rlsName, err))
 				} else {
-					installResponse, err := c.helmClient.InstallReleaseFromChart(requestedChart, rlsNamespace,
-						helmapi.ReleaseName(rlsName), helmapi.ValueOverrides([]byte(release.Raw)))
+					updateResponse, err := c.helmClient.UpdateReleaseFromChart(rlsName, requestedChart, helmapi.UpdateValueOverrides([]byte(currentRelease.Raw)))
 					if err != nil {
-						c.recorder.Event(migrate, corev1.EventTypeWarning, FailInstall,
-							fmt.Sprintf("Update (Install) release [%s] has an error : %s", rlsName, err))
+						c.recorder.Event(migrate, corev1.EventTypeWarning, FailUpdate,
+							fmt.Sprintf("Update release [%s] has an error : %s", rlsName, err))
 					} else {
-						revisions[rlsName] = installResponse.Release.Version
+						revisions[rlsName] = updateResponse.Release.Version
 						c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
-							fmt.Sprintf("Updating (Installing) release [%s] successfully", rlsName))
+							fmt.Sprintf("Updating release [%s] successfully, previous revision:%d, current revision:%d",
+								rlsName, releaseResponse.Release.Version, updateResponse.Release.Version))
 					}
 				}
-				continue
 			} else {
-				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-					fmt.Sprintf("Error - find the release [%s] info : %s, so can not update", rlsName, err))
-				continue
-			}
-		}
-
-		if releaseResponse != nil {
-			if migrate.Status.ReleaseRevision[rlsName] == releaseResponse.Release.Version {
-				klog.Infof("Release %s has been updated to version %d.", rlsName, migrate.Status.ReleaseRevision[rlsName])
-				continue
-			}
-
-			//releaseResponse.GetRelease().Chart
-			requestedChart, err := chartutil.LoadArchive(bytes.NewReader(migrate.Spec.Chart))
-			if err != nil {
-				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
-					fmt.Sprintf("Get chart of release [%s] from migrate CRD has an error : %s", rlsName, err))
-			} else {
-				updateResponse, err := c.helmClient.UpdateReleaseFromChart(rlsName, requestedChart, helmapi.UpdateValueOverrides([]byte(release.Raw)))
-				if err != nil {
-					c.recorder.Event(migrate, corev1.EventTypeWarning, FailUpdate,
-						fmt.Sprintf("Update release [%s] has an error : %s", rlsName, err))
-				} else {
-					revisions[rlsName] = updateResponse.Release.Version
-					c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
-						fmt.Sprintf("Updating release [%s] successfully, previous revision:%d, current revision:%d",
-							rlsName, releaseResponse.Release.Version, updateResponse.Release.Version))
-				}
+				c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
+					fmt.Sprintf("Release [%s] is not exist, the operater can not update it.", rlsName))
 			}
 		} else {
-			c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
-				fmt.Sprintf("Release [%s] is not exist, the operater can not update it.", rlsName))
+			klog.Infof("##### We found a release which belong to group [%s] is not in the Spec definition, we should delete it.", releaseGroup)
+			// if this release which belongs to current group is not be defined, we must delete it.
+			ops := []helmapi.ReleaseListOption{
+				helmapi.ReleaseListSort(int32(rls.ListSort_LAST_RELEASED)),
+				helmapi.ReleaseListOrder(int32(rls.ListSort_DESC)),
+				helmapi.ReleaseListStatuses([]release.Status_Code{
+					release.Status_DEPLOYED,
+					release.Status_FAILED,
+					release.Status_DELETING,
+					release.Status_PENDING_INSTALL,
+					release.Status_PENDING_UPGRADE,
+					release.Status_PENDING_ROLLBACK}),
+				// helm.ReleaseListLimit(limit),
+				// helm.ReleaseListFilter(filter),
+				// helm.ReleaseListNamespace(""),
+			}
+
+			ops = append(ops, helmapi.ReleaseListFilter(fmt.Sprintf("^%s(-gz|-rz).*(-%s)$", migrate.Spec.AppName, releaseGroup)))
+			listResponse, err := c.helmClient.ListReleases(ops...)
+			if err != nil {
+				// if the release is not exist, we should install it.
+				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
+					fmt.Sprintf("Error - list the release info : %s, so can not update", err))
+				continue
+
+			}
+
+			if listResponse == nil {
+				klog.Infof("##### Found no release for group [%s] which will be deleted, no need to anything.", releaseGroup)
+				continue
+			}
+
+			if len(listResponse.Releases) == 1 {
+				klog.Infof("##### Found the release [%s] which will be deleted", listResponse.Releases[0].Name)
+				_, err := c.helmClient.DeleteRelease(listResponse.Releases[0].Name, helmapi.DeletePurge(true))
+				if err != nil {
+					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
+						fmt.Sprintf("Delete error : %s", err))
+					continue
+				}
+
+				c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+					fmt.Sprintf("Release [%s] has been deleted successfully.", listResponse.Releases[0].Name))
+			} else {
+				klog.Infof("##### Found more than one release [%d] which will be deleted, we are not sure which one should be deleted?", len(listResponse.Releases))
+			}
 		}
 	}
-
 	return revisions
 }
 
@@ -547,7 +615,7 @@ func (c *Controller) handleObject(obj interface{}) {
 }
 
 // Updating the status of a migrate which has been set as a deleting one.
-func (c *Controller) writeDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
+func (c *Controller) syncDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
@@ -590,7 +658,7 @@ func (c *Controller) writeDeleteMigrateStatus(migrate *v1.Migrate, deployments [
 }
 
 // Updating the status of migrate which has been set as a installing one
-func (c *Controller) writeInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
+func (c *Controller) syncInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
@@ -632,7 +700,7 @@ func (c *Controller) writeInstallMigrateStatus(migrate *v1.Migrate, deployments 
 }
 
 // Updating the status of migrate which has been set as a installing one
-func (c *Controller) writeUpdateMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment, revisions map[string]int32) error {
+func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment, revisions map[string]int32) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
@@ -651,10 +719,10 @@ func (c *Controller) writeUpdateMigrateStatus(migrate *v1.Migrate, deployments [
 				}
 			}
 			if currentRelease == nil {
-				klog.Infof("Can not find release with deployment's label %s", rlsName)
+				klog.Infof("Can not find release in Spec part with deployment's label %s", rlsName)
 				upsertCondition(migrateCopy, v1.MigrateCondition{
 					conditionType, constant.ConditionStatusFalse, now, now, "",
-					fmt.Sprintf("Can not find release with deployment's label %s", rlsName)})
+					fmt.Sprintf("Can not find release in Spec part with deployment's label %s", rlsName)})
 				continue
 			}
 
@@ -664,8 +732,14 @@ func (c *Controller) writeUpdateMigrateStatus(migrate *v1.Migrate, deployments [
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})
 			klog.Info(message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas && deploy.Status.AvailableReplicas == currentRelease.Replicas {
-				upsertCondition(migrateCopy, v1.MigrateCondition{
-					conditionType, constant.ConditionStatusTrue, now, now, "", message})
+				releaseResponse, err := c.helmClient.GetReleaseByVersion(rlsName, 0)
+				if err != nil {
+					klog.Infof("Get release [%s] has an error : %s", rlsName, err)
+				} else {
+					if releaseResponse.Release.Version == migrateCopy.Status.ReleaseRevision[rlsName] {
+						upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusTrue, now, now, "", message})
+					}
+				}
 			}
 		}
 	}

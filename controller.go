@@ -313,11 +313,11 @@ func (c *Controller) syncHandler(key string) error {
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
 	if err != nil {
-		klog.Infof("Can not find the deployments for migrate: %s, ignore it.", migrate.GetName())
+		klog.Infof("Can not find the deployments for migrate [%s], ignore it.", migrate.GetName())
 		return nil
 	}
 	action := migrate.Spec.Action
-	klog.Infof("The action : '%s'", action)
+	klog.Infof("The action of migrate [%s]: '%s'", migrate.GetName(), action)
 
 	if action == v1.MigrateActionInstall {
 		c.installReleases(migrate)
@@ -579,9 +579,9 @@ func (c *Controller) syncDeleteMigrateStatus(migrate *v1.Migrate, deployments []
 		now, now, "", "The release has been deleted"})
 
 	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("The deployments for migrate: %s is null or empty.", migrate.GetName())
+		klog.Infof("Wait for the deployments which related to migrate [%s] to disappear.", migrate.GetName())
 		for _, deploy := range deployments {
-			message := fmt.Sprintf("Check the deployment:%s: replica:%d, available:%d",
+			message := fmt.Sprintf("Check the deployment [%s]: replica:%d, available:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
 			klog.Info(message)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
@@ -615,7 +615,7 @@ func (c *Controller) syncInstallMigrateStatus(migrate *v1.Migrate, deployments [
 	now := metav1.Now()
 
 	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("The deployments for migrate: %s is null or empty, update the status of the migrate.", migrate.GetName())
+		klog.Infof("The deployments for migrate [%s] is null or empty, update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
 			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
 			message := fmt.Sprintf("Deployment %s status: replica:%d, available:%d",
@@ -657,7 +657,7 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 	now := metav1.Now()
 
 	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("The deployments for migrate: %s is not null or not empty, then update the status of the migrate.", migrate.GetName())
+		klog.Infof("The deployments for migrate [%s] is not null or not empty, then update the status of the migrate.", migrate.GetName())
 		for _, deploy := range deployments {
 			var message = ""
 			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
@@ -673,11 +673,11 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 				klog.Infof("Can not find release in Spec part with deployment's label %s", rlsName)
 				upsertCondition(migrateCopy, v1.MigrateCondition{
 					conditionType, constant.ConditionStatusFalse, now, now, "",
-					fmt.Sprintf("Can not find release in Spec part with deployment's label %s", rlsName)})
+					fmt.Sprintf("Can not find release in Spec part with deployment's label %s, so wait for it to disappear.", rlsName)})
 				continue
 			}
 
-			message = fmt.Sprintf("Deployment %s status: desired replica:%d, available:%d, Migrate replica count:%d",
+			message = fmt.Sprintf("Deployment [%s]'s status: desired replica:%d, available:%d, Migrate replica count:%d",
 				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas, currentRelease.Replicas)
 			upsertCondition(migrateCopy, v1.MigrateCondition{
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})
@@ -685,8 +685,16 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas && deploy.Status.AvailableReplicas == currentRelease.Replicas {
 				getRelease, err := c.helmClient.GetRelease(rlsName)
 				if err != nil {
-					klog.Infof("Get release [%s] has an error : %s", rlsName, err)
+					klog.Infof("Find release [%s] has an error : %s", rlsName, err.Error())
 				} else {
+					if migrateCopy.Status.ReleaseRevision == nil {
+						message = fmt.Sprintf("The revision information in status is null, then wait for it to be updated in the next task. migrate [%s]", migrateCopy.Name)
+						klog.Infof(message)
+						upsertCondition(migrateCopy, v1.MigrateCondition{
+							conditionType, constant.ConditionStatusFalse, now, now, "", message})
+						continue
+					}
+
 					if getRelease != nil && getRelease.Version == migrateCopy.Status.ReleaseRevision[rlsName] {
 						upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusTrue, now, now, "", message})
 					}

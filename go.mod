@@ -77,7 +77,7 @@ require (
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c // indirect
 	google.golang.org/appengine v1.5.0 // indirect
 	google.golang.org/genproto v0.0.0-20181202183823-bd91e49a0898 // indirect
-	google.golang.org/grpc v1.17.0
+	google.golang.org/grpc v1.17.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/square/go-jose.v2 v2.3.0 // indirect

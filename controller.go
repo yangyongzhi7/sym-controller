@@ -391,7 +391,7 @@ func (c *Controller) updateReleases(migrate *v1.Migrate, deployments []*appsv1.D
 		isNeed := false
 		var currentRelease *v1.ReleasesConfig
 		for _, release := range releases {
-			if strings.Contains(release.Name, releaseGroup) {
+			if strings.Contains(release.Name, "-"+releaseGroup) {
 				isNeed = true
 				currentRelease = release
 			}
@@ -487,8 +487,11 @@ func (c *Controller) deleteReleases(migrate *v1.Migrate) {
 		return
 	}
 
-	releases := migrate.Spec.Releases
-	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
+	releases, err := c.helmClient.FilterReleases(fmt.Sprintf("^%s(-gz|-rz).*(-%s|-%s)$", migrate.Spec.AppName, constant.BlueGroup, constant.GreenGroup))
+	if err != nil {
+		c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
+			fmt.Sprintf("Can not find any releases when you want to delete them [%s], error : %s", migrate.Name, err.Error()))
+	}
 
 	for _, release := range releases {
 		rlsName := release.Name

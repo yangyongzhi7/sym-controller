@@ -6,7 +6,7 @@ replicaCount: 1
 
 image:
   repository: hub.tencentyun.com/demo001/sym-operator
-  tag: v0.0.3
+  tag: v0.0.4
   pullPolicy: IfNotPresent
 
 nameOverride: ""

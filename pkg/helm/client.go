@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/golang/glog"
 	"github.com/goph/emperror"
+	"github.com/jasonlvhit/gocron"
 	"github.com/pkg/errors"
 	"io/ioutil"
 	"k8s.io/client-go/kubernetes"
@@ -17,9 +18,13 @@ import (
 	"k8s.io/helm/pkg/proto/hapi/chart"
 	"k8s.io/helm/pkg/proto/hapi/release"
 	rls "k8s.io/helm/pkg/proto/hapi/services"
+	"k8s.io/klog"
 	"os"
 	"strings"
 )
+
+// minutes
+const keepLiveInteval = 10
 
 // Client encapsulates a Helm Client and a Tunnel for that client to interact with the Tiller pod
 type Client struct {
@@ -49,8 +54,30 @@ func NewClient(cfg *restclient.Config, kubeClient *kubernetes.Clientset) (*Clien
 	glog.Infof("created kubernetes tunnel on address:%s", tillerTunnelAddress)
 
 	hClient := helm.NewClient(helm.Host(tillerTunnelAddress))
+	symHelmClient := &Client{Tunnel: tillerTunnel, Client: hClient}
 
-	return &Client{Tunnel: tillerTunnel, Client: hClient}, nil
+	// keep the tunnel live.
+	gocron.Every(keepLiveInteval).Seconds().Do(symHelmClient.Ping)
+
+	return symHelmClient, nil
+}
+
+func (helmClient *Client) Ping() {
+	err := helmClient.Client.PingTiller()
+	if err != nil {
+		klog.Errorf("Ping tiller has an error in a keeping live process, %s", err.Error())
+		return
+	}
+	klog.Infof("Keep the helm client tunnel alive regularly by Ping request")
+}
+
+func (helmClient *Client) KeepLive() {
+	versionResponse, err := helmClient.Client.GetVersion()
+	if err != nil {
+		klog.Errorf("Get version has an error in a keeping live process, %s", err.Error())
+		return
+	}
+	klog.Infof("Keep the helm client tunnel alive regularly by sending getVersion request, version : %s", versionResponse.Version.SemVer)
 }
 
 //

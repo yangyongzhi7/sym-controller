@@ -93,6 +93,8 @@ github.com/huandu/xstrings
 github.com/imdario/mergo
 # github.com/inconshreveable/mousetrap v1.0.0
 github.com/inconshreveable/mousetrap
+# github.com/jasonlvhit/gocron v0.0.0-20190603000501-f1cf2bd73e84
+github.com/jasonlvhit/gocron
 # github.com/json-iterator/go v1.1.6
 github.com/json-iterator/go
 # github.com/konsorten/go-windows-terminal-sequences v1.0.1

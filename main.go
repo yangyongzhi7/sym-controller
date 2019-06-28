@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"github.com/jasonlvhit/gocron"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
 	"k8s.io/client-go/rest"
 	"os"
@@ -67,7 +68,7 @@ func main() {
 
 	helmClient, err := helm.NewClient(cfg, kubeClient)
 	if err != nil {
-		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
+		klog.Fatalf("Error building helm client: %s", err.Error())
 	}
 
 	symClient, err := clientset.NewForConfig(cfg)
@@ -86,6 +87,8 @@ func main() {
 	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.
 	kubeInformerFactory.Start(stopCh)
 	symInformerFactory.Start(stopCh)
+
+	go func() { <-gocron.Start() }()
 
 	if err = controller.Run(2, stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())

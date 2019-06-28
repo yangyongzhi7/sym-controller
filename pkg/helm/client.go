@@ -23,8 +23,8 @@ import (
 	"strings"
 )
 
-// minutes
-const keepLiveInteval = 10
+// hours
+const keepLiveInteval = 1
 
 // Client encapsulates a Helm Client and a Tunnel for that client to interact with the Tiller pod
 type Client struct {
@@ -57,7 +57,7 @@ func NewClient(cfg *restclient.Config, kubeClient *kubernetes.Clientset) (*Clien
 	symHelmClient := &Client{Tunnel: tillerTunnel, Client: hClient}
 
 	// keep the tunnel live.
-	gocron.Every(keepLiveInteval).Seconds().Do(symHelmClient.Ping)
+	gocron.Every(keepLiveInteval).Hours().Do(symHelmClient.Ping)
 
 	return symHelmClient, nil
 }

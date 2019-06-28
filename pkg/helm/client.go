@@ -65,10 +65,10 @@ func NewClient(cfg *restclient.Config, kubeClient *kubernetes.Clientset) (*Clien
 func (helmClient *Client) Ping() {
 	err := helmClient.Client.PingTiller()
 	if err != nil {
-		klog.Errorf("Ping tiller has an error in a keeping live process, %s", err.Error())
+		klog.Errorf("Ping tiller has an error in a keeping alive process, %s", err.Error())
 		return
 	}
-	klog.Infof("Keep the helm client tunnel alive regularly by Ping request")
+	klog.Infof("Ping tiller")
 }
 
 func (helmClient *Client) KeepLive() {

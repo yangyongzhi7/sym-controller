@@ -14,7 +14,7 @@
 #
 
 # Current version of the project.
-VERSION ?= v0.0.4
+VERSION ?= v0.0.5
 
 # Target binaries. You can build multiple binaries for a single project.
 TARGETS := sym-operator

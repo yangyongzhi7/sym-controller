@@ -20,7 +20,9 @@ import (
 	"flag"
 	"github.com/jasonlvhit/gocron"
 	"github.com/yangyongzhi/sym-operator/pkg/helm"
+	"github.com/yangyongzhi/sym-operator/pkg/monitor"
 	"k8s.io/client-go/rest"
+	"net/http"
 	"os"
 	"time"
 
@@ -88,11 +90,34 @@ func main() {
 	kubeInformerFactory.Start(stopCh)
 	symInformerFactory.Start(stopCh)
 
+	// Start a cron scheduler
 	go func() { <-gocron.Start() }()
+
+	//Start a monitor for symphony operator
+	//monitorErrCh := make(chan error)
+	go func() {
+		mux := monitor.NewProbesMux()
+
+		// Register gRPC server to prometheus to initialized matrix
+		//goprom.Register(rootServer)
+		monitor.AddPrometheusHandler(mux)
+
+		if err := http.ListenAndServe(monitor.MonitorAddr, mux); err != nil {
+			//monitorErrCh <- err
+			klog.Fatalf("Error start monitor server: %s", err.Error())
+		}
+	}()
+	//select {
+	//case err := <-srvErrCh:
+	//	logger.Fatalf("Server died: %s", err)
+	//case err := <-monitorErrCh:
+	//	klog.Fatalf("Monitor server died: %s", err.Error())
+	//}
 
 	if err = controller.Run(2, stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())
 	}
+
 }
 
 func init() {

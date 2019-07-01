@@ -689,6 +689,8 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 				getRelease, err := c.helmClient.GetRelease(rlsName)
 				if err != nil {
 					klog.Infof("Find release [%s] has an error : %s", rlsName, err.Error())
+					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
+						fmt.Sprintf("Error - Get the release [%s] info : %s", rlsName, err))
 				} else {
 					if migrateCopy.Status.ReleaseRevision == nil {
 						message = fmt.Sprintf("The revision information in Status is null, maybe you don't update the release yet. migrate [%s]",

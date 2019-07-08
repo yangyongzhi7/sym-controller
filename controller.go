@@ -509,7 +509,7 @@ func (c *Controller) deleteReleases(migrate *v1.Migrate) {
 	}
 }
 
-// enqueueFoo takes a Foo resource and converts it into a namespace/name
+// enqueueMigrate takes a Migrate resource and converts it into a namespace/name
 // string which is then put onto the work queue. This method should *not* be
 // passed resources of any type other than Foo.
 func (c *Controller) enqueueMigrate(obj interface{}) {
@@ -525,7 +525,7 @@ func (c *Controller) enqueueMigrate(obj interface{}) {
 // handleObject will take any resource implementing metav1.Object and attempt
 // to find the Foo resource that 'owns' it. It does this by looking at the
 // objects metadata.ownerReferences field for an appropriate OwnerReference.
-// It then enqueues that Foo resource to be processed. If the object does not
+// It then enqueues that Migrate resource to be processed. If the object does not
 // have an appropriate OwnerReference, it will simply be skipped.
 func (c *Controller) handleObject(obj interface{}) {
 	var object metav1.Object
@@ -568,7 +568,7 @@ func (c *Controller) handleObject(obj interface{}) {
 
 }
 
-// Updating the status of a migrate which has been set as a deleting one.
+// Updating the status of a migrate which has been set as the deleting state.
 func (c *Controller) syncDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
@@ -611,7 +611,7 @@ func (c *Controller) syncDeleteMigrateStatus(migrate *v1.Migrate, deployments []
 	return err
 }
 
-// Updating the status of migrate which has been set as a installing one
+// Updating the status of migrate which has been set as an installing state.
 func (c *Controller) syncInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished

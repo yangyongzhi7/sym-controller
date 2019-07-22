@@ -102,7 +102,7 @@ func main() {
 	//Start a monitor for symphony operator
 	//monitorErrCh := make(chan error)
 	go func() {
-		mux := monitor.NewProbesMux()
+		mux := monitor.NewProbesMux(helmClient)
 
 		// Register gRPC server to prometheus to initialized matrix
 		//goprom.Register(rootServer)

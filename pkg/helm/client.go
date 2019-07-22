@@ -71,13 +71,14 @@ func (helmClient *Client) Ping() {
 	klog.Infof("Ping tiller")
 }
 
-func (helmClient *Client) KeepLive() {
+func (helmClient *Client) KeepLive() error {
 	versionResponse, err := helmClient.Client.GetVersion()
 	if err != nil {
 		klog.Errorf("Get version has an error in a keeping live process, %s", err.Error())
-		return
+		return err
 	}
 	klog.Infof("Keep the helm client tunnel alive regularly by sending getVersion request, version : %s", versionResponse.Version.SemVer)
+	return nil
 }
 
 //

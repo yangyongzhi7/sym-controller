@@ -37,10 +37,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
-	"strings"
 	"time"
 
-	samplev1alpha1 "github.com/yangyongzhi/sym-operator/pkg/apis/example/v1"
 	clientset "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned"
 	samplescheme "github.com/yangyongzhi/sym-operator/pkg/client/clientset/versioned/scheme"
 	informers "github.com/yangyongzhi/sym-operator/pkg/client/informers/externalversions/devops/v1"
@@ -298,17 +296,19 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
+	/*
+	 * 1.Insert the missing release
+	 * 2.Delete the redundant release
+	 * 3.Update the existing release
+	 */
+	revisions := c.reconcileReleases(migrate)
+
 	// Find all deployment with the app name, always there should be two deployments with this app name (blue & green).
 	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
 	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
 	labelSet := labels.Set{}
 	labelSet[constant.AppLabel] = appName
 	deployments, err := c.deploymentsLister.Deployments(migrate.GetNamespace()).List(labels.SelectorFromSet(labelSet))
-	// If the resource doesn't exist, we'll create it
-	//if errors.IsNotFound(err) {
-	//	deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
-	//}
-
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
 	// temporary network failure, or any other transient reason.
@@ -316,197 +316,105 @@ func (c *Controller) syncHandler(key string) error {
 		klog.Infof("Can not find the deployments for migrate [%s], ignore it.", migrate.GetName())
 		return nil
 	}
-	action := migrate.Spec.Action
-	klog.Infof("The action of migrate [%s]: '%s'", migrate.GetName(), action)
-
-	if action == v1.MigrateActionInstall {
-		c.installReleases(migrate)
-		c.syncInstallMigrateStatus(migrate, deployments)
-	} else if action == v1.MigrateActionDelete {
-		c.deleteReleases(migrate)
-		c.syncDeleteMigrateStatus(migrate, deployments)
-	} else if action == v1.MigrateActionUpdate {
-		revisions := c.updateReleases(migrate, deployments)
-		c.syncUpdateMigrateStatus(migrate, deployments, revisions)
-	}
+	/* Refresh the status of migration.*/
+	c.syncMigrateStatus(migrate, deployments, revisions)
 
 	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	//+", "+strconv.Itoa(rand.Int())
+
 	return nil
 }
 
-// Install release
-func (c *Controller) installReleases(migrate *v1.Migrate) {
+/*
+ * Reconcile the releases which are running in current cluster with the releases in the migration CRD.
+ */
+func (c *Controller) reconcileReleases(migrate *v1.Migrate) map[string]int32 {
+	klog.Infof("##### Start to reconcile releases with migrate: '%s'", migrate.Name)
 	if migrate.Status.Finished == constant.ConditionStatusTrue {
-		klog.Infof("Migrate has been execute successfully: '%s'", migrate.Name)
-		return
-	}
-
-	releases := migrate.Spec.Releases
-	klog.Infof("The raw data as base64 format of this migrate : '%s'", releases)
-
-	for _, release := range releases {
-		rlsName := release.Name
-		rlsNamespace := release.Namespace
-		klog.Infof("Ready to install release [%s] in namespace [%s]", rlsName, rlsNamespace)
-		getRelease, err := c.helmClient.GetRelease(rlsName)
-		if err != nil {
-			//status, _ := status.FromError(err)
-			c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-				fmt.Sprintf("Error - Get the release [%s] info : %s", rlsName, err))
-			continue
-		}
-
-		// you should install it.
-		if getRelease == nil {
-			//releaseResponse.GetRelease().Chart
-			installResponse, err := c.helmClient.InstallRelease(rlsNamespace, rlsName, migrate.Spec.Chart, release.Raw)
-			if err != nil {
-				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
-					fmt.Sprintf("Install release [%s] has an error : %s", rlsName, err))
-			} else {
-				c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessInstalledStatus,
-					fmt.Sprintf("Install release [%s] successfully, version : %d", rlsName, installResponse.Release.Version))
-			}
-		} else {
-			// the release has been exist, you can only update it.
-			c.recorder.Event(migrate, corev1.EventTypeNormal, ResourceExists,
-				fmt.Sprintf("Release [%s] has been installed, operater don't need to do anything.", rlsName))
-		}
-	}
-}
-
-// Update release
-func (c *Controller) updateReleases(migrate *v1.Migrate, deployments []*appsv1.Deployment) map[string]int32 {
-	klog.Infof("##### Start to update migrate: '%s'", migrate.Name)
-	if migrate.Status.Finished == constant.ConditionStatusTrue {
-		klog.Infof("##### The status of migrate has been set as true: '%s', so no need to do anything.", migrate.Name)
+		klog.Infof("##### The status of migrate[%s] has been set as true, so no need to do anything.", migrate.Name)
 		return nil
 	}
 
 	revisions := map[string]int32{}
-	releases := migrate.Spec.Releases
-	releaseIterator := [2]string{constant.BlueGroup, constant.GreenGroup}
-	for _, releaseGroup := range releaseIterator {
-		isNeed := false
-		var currentRelease *v1.ReleasesConfig
-		for _, release := range releases {
-			if strings.Contains(release.Name, "-"+releaseGroup) {
-				isNeed = true
-				currentRelease = release
+	migrateRlses := migrate.Spec.Releases
+	runningRlses, err := c.helmClient.FilterReleases(fmt.Sprintf("^%s(-gz|-rz).*(-%s|-%s)$", migrate.Spec.AppName, constant.BlueGroup, constant.GreenGroup))
+	if err != nil {
+		c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
+			fmt.Sprintf("Can not find any running releases when you want to update [%s], error : %s", migrate.Name, err.Error()))
+		return nil
+	}
+
+	// At first, uninstall the un-defined release in the newest migration.
+	for _, runningRls := range runningRlses {
+		var foundDefinition = false
+		for _, migrateRls := range migrateRlses {
+			if runningRls.Name == migrateRls.Name {
+				foundDefinition = true
 			}
 		}
 
-		// This release which belongs to this group must be exist.
-		if isNeed {
-			rlsName := currentRelease.Name
-			rlsNamespace := currentRelease.Namespace
-			klog.Infof("##### Release [%s]-[%s] has been defined in Spec, so we should update it", rlsName, rlsNamespace)
-			getRelease, err := c.helmClient.GetRelease(rlsName)
+		if !foundDefinition {
+			klog.Infof("##### The running release [%s] has not been defind in migration, we should delete it.", runningRls.Name)
+			_, err := c.helmClient.UninstallRelease(runningRls.Name)
 			if err != nil {
-				//status, _ := status.FromError(err)
-				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-					fmt.Sprintf("Error - find the release [%s] info : %s, so can not update", rlsName, err))
+				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
+					fmt.Sprintf("##### Delete release [%s] has an error : %s", runningRls.Name, err.Error()))
 				continue
+			} else {
+				// Don't save the version of the deleted release into the status.
+				c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
+					fmt.Sprintf("##### Release [%s] has been deleted successfully.", runningRls.Name))
 			}
 
-			// if this release has been exist, we should update it.
-			if getRelease != nil {
-				klog.Infof("##### We already found the release [%s], then we will update it immediately.", rlsName)
-				if migrate.Status.ReleaseRevision[rlsName] == getRelease.Version {
-					klog.Infof("##### Release version in the status [%s] has been updated to version [%d], no need to do anything.",
-						rlsName, migrate.Status.ReleaseRevision[rlsName])
-					revisions[rlsName] = getRelease.Version
-					continue
+			return revisions
+		}
+	}
+
+	// Secondly, update the release with the newest releases in the current migration.
+	for _, migrateRls := range migrateRlses {
+		var rlsIsExist = false
+		for _, runningRls := range runningRlses {
+			if migrateRls.Name == runningRls.Name {
+				rlsIsExist = true
+				klog.Infof("##### We already found the running release [%s] with current migration, then we will update it immediately.", migrateRls.Name)
+				if migrate.Status.ReleaseRevision[migrateRls.Name] == runningRls.Version {
+					klog.Infof("##### Version of release in the status [%s] has been updated to version [%d], no need to do anything.",
+						migrateRls.Name, migrate.Status.ReleaseRevision[migrateRls.Name])
+					break
 				}
 
 				// The version is not same as the one has been aved in status.
-				updateResponse, err := c.helmClient.UpdateRelease(rlsName, migrate.Spec.Chart, currentRelease.Raw)
+				updateResponse, err := c.helmClient.UpdateRelease(migrateRls.Name, migrate.Spec.Chart, migrateRls.Raw)
 				if err != nil {
 					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
-						fmt.Sprintf("Update release [%s] has an error : %s", rlsName, err))
+						fmt.Sprintf("Update release [%s] has an error : %s", migrateRls.Name, err))
 				} else {
-					revisions[rlsName] = updateResponse.Release.Version
+					revisions[migrateRls.Name] = updateResponse.Release.Version
 					c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessUpdatedStatus,
-						fmt.Sprintf("Update release [%s] successfully, version : %d", rlsName, updateResponse.Release.Version))
+						fmt.Sprintf("Update release [%s] successfully, version : %d", migrateRls.Name, updateResponse.Release.Version))
 				}
-				continue
-			} else {
-				klog.Infof("##### Can not find release [%s] when you want to update it, so you should use installing instead of updating.", rlsName)
-				installResponse, err := c.helmClient.InstallRelease(rlsNamespace, rlsName, migrate.Spec.Chart, currentRelease.Raw)
-				if err != nil {
-					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
-						fmt.Sprintf("Install release [%s] has an error : %s", rlsName, err))
-				} else {
-					revisions[rlsName] = installResponse.Release.Version
-					c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessInstalledStatus,
-						fmt.Sprintf("Install release [%s] successfully, version : %d", rlsName, installResponse.Release.Version))
-				}
-				continue
+
+				return revisions
 			}
-		} else {
-			klog.Infof("##### We found a release which belong to group [%s] is not in the Spec definition, we should delete it.", releaseGroup)
-			// if this release which belongs to current group is not be defined, we must delete it.
-			releases, err := c.helmClient.FilterReleases(fmt.Sprintf("^%s(-gz|-rz).*(-%s)$", migrate.Spec.AppName, releaseGroup))
+		}
+
+		// If the release you want to update has not been exist, we install it first.
+		if !rlsIsExist {
+			klog.Infof("##### Can not find release [%s] when you want to update it, so you should use installing instead of updating.", migrateRls.Name)
+			installResponse, err := c.helmClient.InstallRelease(migrateRls.Namespace, migrateRls.Name, migrate.Spec.Chart, migrateRls.Raw)
 			if err != nil {
-				// if the release is not exist, we should install it.
-				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
-					fmt.Sprintf("Error - list the release info : %s, so can not update", err.Error()))
-				continue
-			}
-
-			if releases == nil {
-				klog.Infof("##### Found no release for group [%s] which will be deleted, no need to anything.", releaseGroup)
-				continue
-			}
-
-			if len(releases) == 1 {
-				klog.Infof("##### Found the release [%s] which will be deleted", releases[0].Name)
-				_, err := c.helmClient.UninstallRelease(releases[0].Name)
-				if err != nil {
-					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
-						fmt.Sprintf("Delete release [%s] has an error : %s", releases[0].Name, err.Error()))
-					continue
-				} else {
-					// Don't save the version of the deleted release into the status.
-					c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
-						fmt.Sprintf("Release [%s] has been deleted successfully.", releases[0].Name))
-				}
+				c.recorder.Event(migrate, corev1.EventTypeWarning, ErrReleaseContent,
+					fmt.Sprintf("Install release [%s] has an error : %s", migrateRls.Name, err))
 			} else {
-				klog.Infof("##### Found more than one release [%d] which will be deleted, we are not sure which one should be deleted?", len(releases))
+				revisions[migrateRls.Name] = installResponse.Release.Version
+				c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessInstalledStatus,
+					fmt.Sprintf("Install release [%s] successfully, version : %d", migrateRls.Name, installResponse.Release.Version))
 			}
+			return revisions
 		}
 	}
+
 	return revisions
-}
-
-// Delete releases
-func (c *Controller) deleteReleases(migrate *v1.Migrate) {
-	if migrate.Status.Finished == constant.ConditionStatusTrue {
-		klog.Infof("Migrate has been execute successfully: '%s'", migrate.Name)
-		return
-	}
-
-	releases, err := c.helmClient.FilterReleases(fmt.Sprintf("^%s(-gz|-rz).*(-%s|-%s)$", migrate.Spec.AppName, constant.BlueGroup, constant.GreenGroup))
-	if err != nil {
-		c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
-			fmt.Sprintf("Can not find any releases when you want to delete them [%s], error : %s", migrate.Name, err.Error()))
-	}
-
-	for _, release := range releases {
-		rlsName := release.Name
-		rlsNamespace := release.Namespace
-		klog.Infof("Ready to delete release [%s] in namespace [%s]", rlsName, rlsNamespace)
-		_, err := c.helmClient.UninstallRelease(rlsName)
-		if err != nil {
-			c.recorder.Event(migrate, corev1.EventTypeWarning, ErrDeleteRelease,
-				fmt.Sprintf("Delete release [%s] has an error : %s", rlsName, err.Error()))
-			continue
-		} else {
-			c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced,
-				fmt.Sprintf("Release [%s] has been deleted successfully.", rlsName))
-		}
-	}
 }
 
 // enqueueMigrate takes a Migrate resource and converts it into a namespace/name
@@ -568,115 +476,28 @@ func (c *Controller) handleObject(obj interface{}) {
 
 }
 
-// Updating the status of a migrate which has been set as the deleting state.
-func (c *Controller) syncDeleteMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
-	migrateCopy := migrate.DeepCopy()
-	initialFinished := migrateCopy.Status.Finished
-	now := metav1.Now()
-
-	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.BlueGroup), constant.ConditionStatusTrue,
-		now, now, "", "The release has been deleted"})
-	upsertCondition(migrateCopy, v1.MigrateCondition{
-		constant.ConcatConditionType(constant.GreenGroup), constant.ConditionStatusTrue,
-		now, now, "", "The release has been deleted"})
-
-	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("===== Wait for the deployments which related to migrate [%s] to disappear.", migrate.GetName())
-		for _, deploy := range deployments {
-			message := fmt.Sprintf("Check the deployment [%s]: replica:%d, available:%d",
-				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
-			klog.Info("=====" + message)
-			upsertCondition(migrateCopy, v1.MigrateCondition{
-				constant.ConcatConditionType(deploy.Labels[constant.GroupLabel]), constant.ConditionStatusFalse,
-				now, now, "", "The deployment still exists"})
-		}
-	}
-
-	calFinalStatus(migrateCopy)
-	if initialFinished == constant.ConditionStatusFalse || migrateCopy.Status.Finished == constant.ConditionStatusFalse {
-		migrateCopy.Status.LastUpdateTime = &now
-	}
-
-	// NEVER modify objects from the store. It's a read-only, local cache.
-	// You can use DeepCopy() to make a deep copy of original object and modify this copy
-	// Or create a copy manually for better performance
-
-	// If the CustomResourceSubresources feature gate is not enabled,
-	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
-	// UpdateStatus will not allow changes to the Spec of the resource,
-	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
-	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
-	return err
-}
-
-// Updating the status of migrate which has been set as an installing state.
-func (c *Controller) syncInstallMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment) error {
-	migrateCopy := migrate.DeepCopy()
-	initialFinished := migrateCopy.Status.Finished
-	now := metav1.Now()
-
-	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("===== The deployments belongs to migrate [%s] is not null or not empty, update the status of the INSTALL migrate.", migrate.GetName())
-		for _, deploy := range deployments {
-			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
-			message := fmt.Sprintf("===== Deployment %s status: replica:%d, available:%d",
-				deploy.GetName(), deploy.Status.Replicas, deploy.Status.AvailableReplicas)
-			upsertCondition(migrateCopy, v1.MigrateCondition{
-				conditionType, constant.ConditionStatusFalse, now, now, "", message})
-			klog.Info(message)
-			if deploy.Status.Replicas == deploy.Status.AvailableReplicas {
-				upsertCondition(migrateCopy, v1.MigrateCondition{
-					conditionType, constant.ConditionStatusTrue, now, now, "", message})
-			}
-		}
-	}
-
-	calFinalStatus(migrateCopy)
-	if initialFinished == constant.ConditionStatusFalse || migrateCopy.Status.Finished == constant.ConditionStatusFalse {
-		migrateCopy.Status.LastUpdateTime = &now
-	}
-	// Only for test
-	//clearConditions(migrateCopy)
-
-	// NEVER modify objects from the store. It's a read-only, local cache.
-	// You can use DeepCopy() to make a deep copy of original object and modify this copy
-	// Or create a copy manually for better performance
-
-	// If the CustomResourceSubresources feature gate is not enabled,
-	// we must use Update instead of UpdateStatus to update the Status block of the Foo resource.
-	// UpdateStatus will not allow changes to the Spec of the resource,
-	// which is ideal for ensuring nothing other than resource status has been updated.
-	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
-	//_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).UpdateStatus(migrateCopy)
-	return err
-}
-
 // Updating the status of migrate which has been set as a installing one
-func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment, revisions map[string]int32) error {
+func (c *Controller) syncMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment, revisions map[string]int32) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
 
 	if deployments != nil && len(deployments) > 0 {
-		klog.Infof("===== The deployments for migrate [%s] is not null or not empty, then update the status of the UPDATE migrate.", migrate.GetName())
+		klog.Infof("===== The deployments for migrate [%s] is not null or not empty, then update the status of the current migrate.", migrate.GetName())
 		for _, deploy := range deployments {
 			var message = ""
-			conditionType := constant.ConcatConditionType(deploy.Labels[constant.GroupLabel])
-
 			rlsName := deploy.Spec.Template.Labels[constant.ReleaseLabel]
+			conditionType := constant.ConcatConditionType(rlsName)
+
 			var currentRelease *v1.ReleasesConfig
 			for _, rls := range migrate.Spec.Releases {
 				if rls.Name == rlsName {
 					currentRelease = rls
 				}
 			}
+
 			if currentRelease == nil {
 				klog.Infof("===== Can not find release in Spec part with deployment's label %s, so wait for it to disappear.", rlsName)
-				upsertCondition(migrateCopy, v1.MigrateCondition{
-					conditionType, constant.ConditionStatusFalse, now, now, "",
-					fmt.Sprintf("Can not find release in Spec part with deployment's label %s, so wait for it to disappear.", rlsName)})
 				continue
 			}
 
@@ -686,7 +507,7 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 				conditionType, constant.ConditionStatusFalse, now, now, "", message})
 			klog.Info("===== " + message)
 			if deploy.Status.Replicas == deploy.Status.AvailableReplicas && deploy.Status.AvailableReplicas == currentRelease.Replicas {
-				getRelease, err := c.helmClient.GetRelease(rlsName)
+				getRelease, err := c.helmClient.GetRelease(currentRelease.Name)
 				if err != nil {
 					klog.Infof("Find release [%s] has an error : %s", rlsName, err.Error())
 					c.recorder.Event(migrate, corev1.EventTypeWarning, ErrGetRelease,
@@ -696,16 +517,15 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 						message = fmt.Sprintf("The revision information in Status is null, maybe you don't update the release yet. migrate [%s]",
 							migrateCopy.Name)
 						klog.Info("===== " + message)
-						upsertCondition(migrateCopy, v1.MigrateCondition{
-							conditionType, constant.ConditionStatusFalse, now, now, "", message})
+						upsertCondition(migrateCopy, v1.MigrateCondition{conditionType, constant.ConditionStatusFalse, now, now, "", message})
 						continue
 					}
 
-					if getRelease != nil && getRelease.Version == migrateCopy.Status.ReleaseRevision[rlsName] {
+					if getRelease != nil && getRelease.Version == migrateCopy.Status.ReleaseRevision[currentRelease.Name] {
 						upsertCondition(migrateCopy,
 							v1.MigrateCondition{conditionType, constant.ConditionStatusTrue, now, now, "", message})
 					} else {
-						message = fmt.Sprintf("The revision information  [%d] in Status is not equals to the revision  [%d] in tiller, wait for the next updating.",
+						message = fmt.Sprintf("The revision information  [%d] in Status is not equals to the revision  [%d] in helm, wait for the next updating.",
 							migrateCopy.Name)
 						klog.Info("===== " + message)
 						upsertCondition(migrateCopy, v1.MigrateCondition{
@@ -726,7 +546,13 @@ func (c *Controller) syncUpdateMigrateStatus(migrate *v1.Migrate, deployments []
 	}
 
 	if revisions != nil && len(revisions) > 0 {
-		migrateCopy.Status.ReleaseRevision = revisions
+		for key, value := range revisions {
+			if migrateCopy.Status.ReleaseRevision == nil {
+				migrateCopy.Status.ReleaseRevision = map[string]int32{}
+			}
+
+			migrateCopy.Status.ReleaseRevision[key] = value
+		}
 	}
 
 	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
@@ -780,42 +606,4 @@ func clearConditions(migrateCopy *v1.Migrate) {
 
 	migrateCopy.Status.Conditions = make([]v1.MigrateCondition, 0)
 
-}
-
-// newDeployment creates a new Deployment for a Foo resource. It also sets
-// the appropriate OwnerReferences on the resource so handleObject can discover
-// the Foo resource that 'owns' it.
-func newDeployment(foo *samplev1alpha1.Foo) *appsv1.Deployment {
-	labels := map[string]string{
-		"app":        "nginx",
-		"controller": foo.Name,
-	}
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      foo.Spec.DeploymentName,
-			Namespace: foo.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(foo, samplev1alpha1.SchemeGroupVersion.WithKind("Foo")),
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: foo.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "nginx",
-							Image: "nginx:latest",
-						},
-					},
-				},
-			},
-		},
-	}
 }

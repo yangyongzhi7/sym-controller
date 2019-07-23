@@ -251,6 +251,19 @@ func (c *Controller) processNextWorkItem() bool {
 	return true
 }
 
+// enqueueMigrate takes a Migrate resource and converts it into a namespace/name
+// string which is then put onto the work queue. This method should *not* be
+// passed resources of any type other than Foo.
+func (c *Controller) enqueueMigrate(obj interface{}) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.Add(key)
+}
+
 // syncHandler compares the actual state with the desired, and attempts to
 // converge the two. It then updates the Status block of the Foo resource
 // with the current status of the resource.
@@ -301,23 +314,10 @@ func (c *Controller) syncHandler(key string) error {
 	 * 2.Delete the redundant release
 	 * 3.Update the existing release
 	 */
-	revisions := c.reconcileReleases(migrate)
+	revisions := c.reconcile(migrate)
 
-	// Find all deployment with the app name, always there should be two deployments with this app name (blue & green).
-	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
-	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
-	labelSet := labels.Set{}
-	labelSet[constant.AppLabel] = appName
-	deployments, err := c.deploymentsLister.Deployments(migrate.GetNamespace()).List(labels.SelectorFromSet(labelSet))
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		klog.Infof("Can not find the deployments for migrate [%s], ignore it.", migrate.GetName())
-		return nil
-	}
 	/* Refresh the status of migration.*/
-	c.syncMigrateStatus(migrate, deployments, revisions)
+	c.syncStatus(migrate, revisions)
 
 	c.recorder.Event(migrate, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	//+", "+strconv.Itoa(rand.Int())
@@ -325,10 +325,56 @@ func (c *Controller) syncHandler(key string) error {
 	return nil
 }
 
+// handleObject will take any resource implementing metav1.Object and attempt
+// to find the Foo resource that 'owns' it. It does this by looking at the
+// objects metadata.ownerReferences field for an appropriate OwnerReference.
+// It then enqueues that Migrate resource to be processed. If the object does not
+// have an appropriate OwnerReference, it will simply be skipped.
+func (c *Controller) handleObject(obj interface{}) {
+	var object metav1.Object
+	var ok bool
+	if object, ok = obj.(metav1.Object); !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("error decoding object, invalid type"))
+			return
+		}
+		object, ok = tombstone.Obj.(metav1.Object)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
+			return
+		}
+		klog.Infof("Recovered deleted object '%s' from tombstone", object.GetName())
+	}
+
+	appName := object.GetLabels()[constant.AppLabel]
+	klog.Infof("Processing deployment: %s, app name: %s", object.GetName(), appName)
+
+	// Find the migrate with the app name of this deployment in this namespace.
+	migrate, err := c.symLister.Migrates(object.GetNamespace()).Get(appName)
+	if err != nil {
+		klog.Infof("Find migrate task for deployment [%s] has an error: %s", object.GetName(), err.Error())
+		return
+	}
+	if migrate == nil {
+		klog.Infof("Can not find a migrate task for deployment: %s, ignore it.", object.GetName())
+		return
+	}
+	if migrate.DeletionTimestamp != nil {
+		klog.Infof("Perhaps the migrate which related with this deployment [%s] has been deleted, ignore it.", object.GetName())
+		return
+	}
+
+	klog.Infof("##### Enqueue ##### enqueue a migrate [%s] due to a event of the deployment [%s], app name: %s", migrate.Name, object.GetName(), appName)
+	c.enqueueMigrate(migrate)
+	return
+
+}
+
 /*
  * Reconcile the releases which are running in current cluster with the releases in the migration CRD.
  */
-func (c *Controller) reconcileReleases(migrate *v1.Migrate) map[string]int32 {
+func (c *Controller) reconcile(migrate *v1.Migrate) map[string]int32 {
 	klog.Infof("##### Start to reconcile releases with migrate: '%s'", migrate.Name)
 	if migrate.Status.Finished == constant.ConditionStatusTrue {
 		klog.Infof("##### The status of migrate[%s] has been set as true, so no need to do anything.", migrate.Name)
@@ -417,71 +463,25 @@ func (c *Controller) reconcileReleases(migrate *v1.Migrate) map[string]int32 {
 	return revisions
 }
 
-// enqueueMigrate takes a Migrate resource and converts it into a namespace/name
-// string which is then put onto the work queue. This method should *not* be
-// passed resources of any type other than Foo.
-func (c *Controller) enqueueMigrate(obj interface{}) {
-	var key string
-	var err error
-	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
-		utilruntime.HandleError(err)
-		return
-	}
-	c.workqueue.Add(key)
-}
-
-// handleObject will take any resource implementing metav1.Object and attempt
-// to find the Foo resource that 'owns' it. It does this by looking at the
-// objects metadata.ownerReferences field for an appropriate OwnerReference.
-// It then enqueues that Migrate resource to be processed. If the object does not
-// have an appropriate OwnerReference, it will simply be skipped.
-func (c *Controller) handleObject(obj interface{}) {
-	var object metav1.Object
-	var ok bool
-	if object, ok = obj.(metav1.Object); !ok {
-		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
-		if !ok {
-			utilruntime.HandleError(fmt.Errorf("error decoding object, invalid type"))
-			return
-		}
-		object, ok = tombstone.Obj.(metav1.Object)
-		if !ok {
-			utilruntime.HandleError(fmt.Errorf("error decoding object tombstone, invalid type"))
-			return
-		}
-		klog.Infof("Recovered deleted object '%s' from tombstone", object.GetName())
-	}
-
-	appName := object.GetLabels()[constant.AppLabel]
-	klog.Infof("Processing deployment: %s, app name: %s", object.GetName(), appName)
-
-	// Find the migrate with the app name of this deployment in this namespace.
-	migrate, err := c.symLister.Migrates(object.GetNamespace()).Get(appName)
-	if err != nil {
-		klog.Infof("Find migrate task for deployment [%s] has an error: %s", object.GetName(), err.Error())
-		return
-	}
-	if migrate == nil {
-		klog.Infof("Can not find a migrate task for deployment: %s, ignore it.", object.GetName())
-		return
-	}
-	if migrate.DeletionTimestamp != nil {
-		klog.Infof("Perhaps the migrate which related with this deployment [%s] has been deleted, ignore it.", object.GetName())
-		return
-	}
-
-	klog.Infof("##### Enqueue ##### enqueue a migrate [%s] due to a event of the deployment [%s], app name: %s", migrate.Name, object.GetName(), appName)
-	c.enqueueMigrate(migrate)
-	return
-
-}
-
-// Updating the status of migrate which has been set as a installing one
-func (c *Controller) syncMigrateStatus(migrate *v1.Migrate, deployments []*appsv1.Deployment, revisions map[string]int32) error {
+// Synchronize the status of migrate which has been set as a installing one
+func (c *Controller) syncStatus(migrate *v1.Migrate, revisions map[string]int32) error {
 	migrateCopy := migrate.DeepCopy()
 	initialFinished := migrateCopy.Status.Finished
 	now := metav1.Now()
 
+	// Find all deployment with the app name, always there should be two deployments with this app name (blue & green).
+	//deployment, err := c.deploymentsLister.Deployments(object.GetNamespace()).Get(object.GetName())
+	//r, _ := labels.NewRequirement("app", selection.Equals, []string{appName})
+	labelSet := labels.Set{}
+	labelSet[constant.AppLabel] = migrateCopy.Spec.AppName
+	deployments, err := c.deploymentsLister.Deployments(migrate.GetNamespace()).List(labels.SelectorFromSet(labelSet))
+	// If an error occurs during Get/Create, we'll requeue the item so we can
+	// attempt processing again later. This could have been caused by a
+	// temporary network failure, or any other transient reason.
+	if err != nil {
+		klog.Infof("Can not find the deployments for migrate [%s], ignore it.", migrate.GetName())
+		return nil
+	}
 	if deployments != nil && len(deployments) > 0 {
 		klog.Infof("===== The deployments for migrate [%s] is not null or not empty, then update the status of the current migrate.", migrate.GetName())
 		for _, deploy := range deployments {
@@ -540,7 +540,7 @@ func (c *Controller) syncMigrateStatus(migrate *v1.Migrate, deployments []*appsv
 		}
 	}
 
-	calFinalStatus(migrateCopy)
+	calFinalStatus(migrateCopy, deployments)
 	if initialFinished == constant.ConditionStatusFalse || migrateCopy.Status.Finished == constant.ConditionStatusFalse {
 		migrateCopy.Status.LastUpdateTime = &now
 	}
@@ -555,7 +555,7 @@ func (c *Controller) syncMigrateStatus(migrate *v1.Migrate, deployments []*appsv
 		}
 	}
 
-	_, err := c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
+	_, err = c.symclientset.DevopsV1().Migrates(migrate.Namespace).Update(migrateCopy)
 
 	return err
 }
@@ -582,7 +582,7 @@ func upsertCondition(migrateCopy *v1.Migrate, condition v1.MigrateCondition) {
 }
 
 // You should calculate the final status for this migrate after inserting (update) its conditions.
-func calFinalStatus(migrateCopy *v1.Migrate) {
+func calFinalStatus(migrateCopy *v1.Migrate, deployments []*appsv1.Deployment) {
 	if len(migrateCopy.Status.Conditions) != len(migrateCopy.Spec.Releases) {
 		migrateCopy.Status.Finished = constant.ConditionStatusFalse
 		return
@@ -593,6 +593,11 @@ func calFinalStatus(migrateCopy *v1.Migrate) {
 			migrateCopy.Status.Finished = constant.ConditionStatusFalse
 			return
 		}
+	}
+
+	if len(deployments) != len(migrateCopy.Spec.Releases) {
+		migrateCopy.Status.Finished = constant.ConditionStatusFalse
+		return
 	}
 
 	migrateCopy.Status.Finished = constant.ConditionStatusTrue
